@@ -298,24 +298,21 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
         SortColumn::Ctx => 10,
         SortColumn::UseCase => 12,
     };
-    let header_cells = header_names
-        .iter()
-        .enumerate()
-        .map(|(i, h)| {
-            if i == sort_col_idx {
-                Cell::from(format!("{} ▼", h)).style(
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                )
-            } else {
-                Cell::from(*h).style(
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                )
-            }
-        });
+    let header_cells = header_names.iter().enumerate().map(|(i, h)| {
+        if i == sort_col_idx {
+            Cell::from(format!("{} ▼", h)).style(
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else {
+            Cell::from(*h).style(
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )
+        }
+    });
     let header = Row::new(header_cells).height(1);
 
     let rows: Vec<Row> = app

@@ -341,11 +341,7 @@ pub fn rank_models_by_fit(models: Vec<ModelFit>) -> Vec<ModelFit> {
 }
 
 pub fn rank_models_by_fit_opts(models: Vec<ModelFit>, installed_first: bool) -> Vec<ModelFit> {
-    rank_models_by_fit_opts_col(
-        models,
-        installed_first,
-        crate::tui_app::SortColumn::Score,
-    )
+    rank_models_by_fit_opts_col(models, installed_first, crate::tui_app::SortColumn::Score)
 }
 
 pub fn rank_models_by_fit_opts_col(
