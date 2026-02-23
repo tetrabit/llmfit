@@ -66,7 +66,13 @@ brew install llmfit
 curl -fsSL https://llmfit.axjns.dev/install.sh | sh
 ```
 
-Downloads the latest release binary from GitHub and installs it to `/usr/local/bin` (or `~/.local/bin`).
+Downloads the latest release binary from GitHub and installs it to `/usr/local/bin` (or `~/.local/bin` if no sudo).
+
+**Install to `~/.local/bin` without sudo:**
+
+```sh
+curl -fsSL https://llmfit.axjns.dev/install.sh | sh -s -- --local
+```
 
 ### From source
 
