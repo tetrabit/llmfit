@@ -12,12 +12,24 @@ Usage:
 
 import argparse
 import json
+import os
 import sys
 import time
 import urllib.request
 import urllib.error
 
 HF_API = "https://huggingface.co/api/models"
+
+# Global auth token, set from --token flag or HF_TOKEN / HUGGING_FACE_HUB_TOKEN env var
+_hf_token: str | None = None
+
+
+def _auth_headers() -> dict[str, str]:
+    """Return HTTP headers with auth if a HuggingFace token is available."""
+    headers = {"User-Agent": "llmfit-scraper/1.0"}
+    if _hf_token:
+        headers["Authorization"] = f"Bearer {_hf_token}"
+    return headers
 
 # Top text-generation models to scrape (owner/repo)
 TARGET_MODELS = [
@@ -196,12 +208,16 @@ MOE_ACTIVE_PARAMS = {
 def fetch_model_info(repo_id: str) -> dict | None:
     """Fetch model info from HuggingFace API."""
     url = f"{HF_API}/{repo_id}"
-    req = urllib.request.Request(url, headers={"User-Agent": "llmfit-scraper/1.0"})
+    req = urllib.request.Request(url, headers=_auth_headers())
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             return json.loads(resp.read().decode())
     except urllib.error.HTTPError as e:
-        print(f"  ⚠ HTTP {e.code} for {repo_id} — skipping", file=sys.stderr)
+        if e.code == 401 and not _hf_token:
+            print(f"  ⚠ HTTP 401 for {repo_id} — model is gated, set HF_TOKEN to access",
+                  file=sys.stderr)
+        else:
+            print(f"  ⚠ HTTP {e.code} for {repo_id} — skipping", file=sys.stderr)
         return None
     except Exception as e:
         print(f"  ⚠ Error fetching {repo_id}: {e}", file=sys.stderr)
@@ -339,7 +355,7 @@ def infer_context_length(config: dict | None) -> int:
 def fetch_config_json(repo_id: str) -> dict | None:
     """Fetch the full config.json from a HF repo (has max_position_embeddings)."""
     url = f"https://huggingface.co/{repo_id}/resolve/main/config.json"
-    req = urllib.request.Request(url, headers={"User-Agent": "llmfit-scraper/1.0"})
+    req = urllib.request.Request(url, headers=_auth_headers())
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
             return json.loads(resp.read().decode())
@@ -476,7 +492,7 @@ def discover_trending_models(limit: int = 30, min_downloads: int = 10000) -> lis
             f"direction=-1&"
             f"limit={fetch_limit}"
         )
-        req = urllib.request.Request(url, headers={"User-Agent": "llmfit-scraper/1.0"})
+        req = urllib.request.Request(url, headers=_auth_headers())
         try:
             with urllib.request.urlopen(req, timeout=30) as resp:
                 models = json.loads(resp.read().decode())
@@ -546,7 +562,25 @@ def main():
         "--min-downloads", type=int, default=10000,
         help="Minimum download count for discovered models (default: 10000)."
     )
+    parser.add_argument(
+        "--token", type=str, default=None,
+        help="HuggingFace API token for accessing gated models. "
+             "Can also be set via HF_TOKEN or HUGGING_FACE_HUB_TOKEN env var."
+    )
     args = parser.parse_args()
+
+    # Resolve auth token: CLI flag > HF_TOKEN > HUGGING_FACE_HUB_TOKEN
+    global _hf_token
+    _hf_token = (
+        args.token
+        or os.environ.get("HF_TOKEN")
+        or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    )
+    if _hf_token:
+        print(f"🔑 Authenticated with HuggingFace token ({_hf_token[:4]}...{_hf_token[-4:]})")
+    else:
+        print("ℹ  No HF token set. Gated models will use fallback data.")
+        print("   Set HF_TOKEN env var or pass --token to access gated models.\n")
 
     # Fallback entries for gated/auth-required models where the API
     # doesn't return safetensors metadata without a token.
@@ -1034,14 +1068,14 @@ def main():
     # Sort by parameter count
     results.sort(key=lambda m: m["parameters_raw"])
 
-    output_path = "data/hf_models.json"
-    import os
-    os.makedirs("data", exist_ok=True)
+    # Write to both locations: repo root (for reference) and llmfit-core (compiled into binary)
+    output_paths = ["data/hf_models.json", "llmfit-core/data/hf_models.json"]
+    for output_path in output_paths:
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        with open(output_path, "w") as f:
+            json.dump(results, f, indent=2)
 
-    with open(output_path, "w") as f:
-        json.dump(results, f, indent=2)
-
-    print(f"\n✅ Wrote {len(results)} models to {output_path}")
+    print(f"\n✅ Wrote {len(results)} models to {', '.join(output_paths)}")
     print(f"   Curated: {len(TARGET_MODELS)}, Fallbacks: {fallback_count}, "
           f"Discovered: {discovered_count}")
 
