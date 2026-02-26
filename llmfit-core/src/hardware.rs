@@ -1307,7 +1307,8 @@ fn estimate_vram_from_name(name: &str) -> f64 {
         && !lower.contains(" r5 ")
         && !lower.contains(" r7 ")
         && !lower.contains(" r9 ")
-        && !lower.contains("8060") && !lower.contains("8050")
+        && !lower.contains("8060")
+        && !lower.contains("8050")
         && (lower.contains("graphics") || lower.contains("igpu"))
     {
         return 0.5;
