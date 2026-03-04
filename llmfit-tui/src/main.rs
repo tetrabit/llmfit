@@ -475,7 +475,7 @@ fn run_diff(
         };
 
     if json {
-        display::display_json_fits(&specs, &selected);
+        display::display_json_diff_fits(&specs, &selected);
     } else {
         specs.display();
         display::display_model_diff(&selected, sort.label());
