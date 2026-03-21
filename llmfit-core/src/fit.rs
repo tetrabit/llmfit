@@ -161,12 +161,12 @@ impl ModelFit {
 
         // Determine inference runtime up front so path selection can use
         // the correct quantization hierarchy.
-        // Pre-quantized models always use vLLM; otherwise honour the
-        // force_runtime override if provided, falling back to auto-detect.
-        let runtime = if model.is_prequantized() {
-            InferenceRuntime::Vllm
-        } else if let Some(forced) = force_runtime {
+        // Honour the force_runtime override first if provided; otherwise
+        // pre-quantized models default to vLLM, falling back to auto-detect.
+        let runtime = if let Some(forced) = force_runtime {
             forced
+        } else if model.is_prequantized() {
+            InferenceRuntime::Vllm
         } else if system.backend == GpuBackend::Metal && system.unified_memory {
             InferenceRuntime::Mlx
         } else {

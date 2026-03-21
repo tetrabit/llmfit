@@ -529,7 +529,6 @@ impl SystemSpecs {
         //   "GPU[0] : vram Total Memory (B): 8589934592"
         // or in table format with "Total" and bytes.
         let mut per_gpu_vram_bytes: Vec<u64> = Vec::new();
-        let mut gpu_count: u32 = 0;
         for line in vram_text.lines() {
             let lower = line.to_lowercase();
             if lower.contains("total") && !lower.contains("used") {
@@ -541,15 +540,27 @@ impl SystemSpecs {
                     && val > 0
                 {
                     per_gpu_vram_bytes.push(val);
-                    gpu_count += 1;
                 }
             }
         }
 
-        if gpu_count == 0 {
-            // rocm-smi succeeded but we couldn't parse VRAM; GPU exists though
-            gpu_count = 1;
-        }
+        // Filter out integrated GPUs (iGPUs) that have very little VRAM.
+        // rocm-smi reports all GPU agents including iGPUs on APUs like
+        // Ryzen 9800X3D, which would otherwise inflate the GPU count.
+        // Discrete GPUs have >= 2 GB VRAM; iGPUs typically show < 1 GB.
+        const IGPU_VRAM_THRESHOLD: u64 = 2 * 1024 * 1024 * 1024; // 2 GB
+        let discrete_vram: Vec<u64> = per_gpu_vram_bytes
+            .iter()
+            .copied()
+            .filter(|&v| v >= IGPU_VRAM_THRESHOLD)
+            .collect();
+        let (effective_vram, gpu_count) = if discrete_vram.is_empty() {
+            // No discrete GPUs found; use all entries (may be an iGPU-only system)
+            (per_gpu_vram_bytes, 1u32)
+        } else {
+            let count = discrete_vram.len() as u32;
+            (discrete_vram, count)
+        };
 
         // Try to get GPU name from rocm-smi --showproductname
         let gpu_name = std::process::Command::new("rocm-smi")
@@ -580,7 +591,7 @@ impl SystemSpecs {
             });
 
         let name = gpu_name.unwrap_or_else(|| "AMD GPU".to_string());
-        let max_per_gpu_bytes = per_gpu_vram_bytes.into_iter().max().unwrap_or(0);
+        let max_per_gpu_bytes = effective_vram.into_iter().max().unwrap_or(0);
         let vram_gb = if max_per_gpu_bytes > 0 {
             Some(max_per_gpu_bytes as f64 / (1024.0 * 1024.0 * 1024.0))
         } else {
