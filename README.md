@@ -21,7 +21,9 @@ A terminal tool that right-sizes LLM models to your system's RAM, CPU, and GPU. 
 
 Ships with an interactive TUI (default) and a classic CLI mode. Supports multi-GPU setups, MoE architectures, dynamic quantization selection, speed estimation, and local runtime providers (Ollama, llama.cpp, MLX, Docker Model Runner, LM Studio).
 
-> **Sister project:** Check out [sympozium](https://github.com/AlexsJones/sympozium/) for managing agents in Kubernetes.
+> **Sister projects:**
+> - [sympozium](https://github.com/sympozium-ai/sympozium/) — managing agents in Kubernetes.
+> - [llmserve](https://github.com/AlexsJones/llmserve) — a simple TUI for serving local LLM models. Pick a model, pick a backend, serve it.
 
 ![demo](demo.gif)
 
