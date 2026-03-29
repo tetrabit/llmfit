@@ -283,7 +283,7 @@ Supported query params for `models`/`models/top`:
 - `perfect`: `true|false` (forces perfect-only when `true`)
 - `min_fit`: `perfect|good|marginal|too_tight`
 - `runtime`: `any|mlx|llamacpp`
-- `use_case`: `general|coding|reasoning|chat|multimodal|embedding`
+- `use_case`: `general|coding|reasoning|chat|agentic|multimodal|embedding`
 - `provider`: provider text filter (substring)
 - `search`: free-text filter across name/provider/size/use-case
 - `sort`: `score|tps|params|mem|ctx|date|use_case`

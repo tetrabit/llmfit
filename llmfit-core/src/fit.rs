@@ -965,6 +965,19 @@ fn quality_score(model: &LlmModel, quant: &str, use_case: UseCase) -> f64 {
                 0.0
             }
         }
+        UseCase::Agentic => {
+            if name_lower.contains("agent")
+                || name_lower.contains("qwen3")
+                || name_lower.contains("qwen2.5")
+                || name_lower.contains("command-r")
+                || name_lower.contains("hermes")
+                || model.use_case.to_lowercase().contains("tool")
+            {
+                5.0
+            } else {
+                0.0
+            }
+        }
         UseCase::Multimodal => {
             if name_lower.contains("vision") || model.use_case.to_lowercase().contains("vision") {
                 6.0
@@ -981,7 +994,11 @@ fn quality_score(model: &LlmModel, quant: &str, use_case: UseCase) -> f64 {
 /// Speed score: normalize estimated TPS against target for the use case.
 fn speed_score(tps: f64, use_case: UseCase) -> f64 {
     let target = match use_case {
-        UseCase::General | UseCase::Coding | UseCase::Multimodal | UseCase::Chat => 40.0,
+        UseCase::General
+        | UseCase::Coding
+        | UseCase::Multimodal
+        | UseCase::Chat
+        | UseCase::Agentic => 40.0,
         UseCase::Reasoning => 25.0,
         UseCase::Embedding => 200.0,
     };
@@ -1013,7 +1030,7 @@ fn fit_score(required: f64, available: f64) -> f64 {
 fn context_score(model: &LlmModel, use_case: UseCase) -> f64 {
     let target: u32 = match use_case {
         UseCase::General | UseCase::Chat => 4096,
-        UseCase::Coding | UseCase::Reasoning => 8192,
+        UseCase::Coding | UseCase::Reasoning | UseCase::Agentic => 8192,
         UseCase::Multimodal => 4096,
         UseCase::Embedding => 512,
     };
@@ -1034,6 +1051,7 @@ fn weighted_score(sc: ScoreComponents, use_case: UseCase) -> f64 {
         UseCase::Coding => (0.50, 0.20, 0.15, 0.15),
         UseCase::Reasoning => (0.55, 0.15, 0.15, 0.15),
         UseCase::Chat => (0.40, 0.35, 0.15, 0.10),
+        UseCase::Agentic => (0.45, 0.25, 0.15, 0.15),
         UseCase::Multimodal => (0.50, 0.20, 0.15, 0.15),
         UseCase::Embedding => (0.30, 0.40, 0.20, 0.10),
     };

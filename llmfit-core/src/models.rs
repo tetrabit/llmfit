@@ -171,6 +171,7 @@ pub enum UseCase {
     Coding,
     Reasoning,
     Chat,
+    Agentic,
     Multimodal,
     Embedding,
 }
@@ -182,6 +183,7 @@ impl UseCase {
             UseCase::Coding => "Coding",
             UseCase::Reasoning => "Reasoning",
             UseCase::Chat => "Chat",
+            UseCase::Agentic => "Agentic",
             UseCase::Multimodal => "Multimodal",
             UseCase::Embedding => "Embedding",
         }
@@ -191,9 +193,20 @@ impl UseCase {
     pub fn from_model(model: &LlmModel) -> Self {
         let name = model.name.to_lowercase();
         let use_case = model.use_case.to_lowercase();
+        let has_tool_use = model.capabilities.contains(&Capability::ToolUse)
+            || use_case.contains("tool")
+            || use_case.contains("function call")
+            || use_case.contains("agent")
+            || name.contains("agent")
+            || name.contains("qwen3")
+            || name.contains("qwen2.5")
+            || name.contains("command-r")
+            || name.contains("hermes");
 
         if use_case.contains("embedding") || name.contains("embed") || name.contains("bge") {
             UseCase::Embedding
+        } else if has_tool_use {
+            UseCase::Agentic
         } else if name.contains("code") || use_case.contains("code") {
             UseCase::Coding
         } else if use_case.contains("vision") || use_case.contains("multimodal") {

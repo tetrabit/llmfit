@@ -1118,6 +1118,8 @@ fn run_recommend(
             "coding" | "code" => Some(llmfit_core::models::UseCase::Coding),
             "reasoning" | "reason" => Some(llmfit_core::models::UseCase::Reasoning),
             "chat" => Some(llmfit_core::models::UseCase::Chat),
+            "agentic" | "agent" | "tool" | "tools" | "tool_use" | "tool-use" | "tool_calling"
+            | "function_calling" => Some(llmfit_core::models::UseCase::Agentic),
             "multimodal" | "vision" => Some(llmfit_core::models::UseCase::Multimodal),
             "embedding" | "embed" => Some(llmfit_core::models::UseCase::Embedding),
             "general" => Some(llmfit_core::models::UseCase::General),

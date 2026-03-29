@@ -277,7 +277,7 @@ curl "http://localhost:8787/api/v1/models/Mistral?runtime=any"
 - `perfect`：`true|false`（为 `true` 时强制仅显示完美适配）
 - `min_fit`：`perfect|good|marginal|too_tight`
 - `runtime`：`any|mlx|llamacpp`
-- `use_case`：`general|coding|reasoning|chat|multimodal|embedding`
+- `use_case`：`general|coding|reasoning|chat|agentic|multimodal|embedding`
 - `provider`：提供商文本过滤（子字符串匹配）
 - `search`：跨名称/提供商/参数量/用途的全文过滤
 - `sort`：`score|tps|params|mem|ctx|date|use_case`

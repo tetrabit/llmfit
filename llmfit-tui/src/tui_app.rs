@@ -384,6 +384,7 @@ impl App {
             UseCase::Coding,
             UseCase::Reasoning,
             UseCase::Chat,
+            UseCase::Agentic,
             UseCase::Multimodal,
             UseCase::Embedding,
         ]

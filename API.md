@@ -162,7 +162,7 @@ Supported on `/api/v1/models` and `/api/v1/models/top` (also `/api/v1/models/{na
 - `perfect`: `true|false` (when `true`, only perfect fits).
 - `min_fit`: `perfect|good|marginal|too_tight`.
 - `runtime`: `any|mlx|llamacpp`.
-- `use_case`: `general|coding|reasoning|chat|multimodal|embedding`.
+- `use_case`: `general|coding|reasoning|chat|agentic|multimodal|embedding`.
 - `provider`: provider substring filter.
 - `search`: free-text filter (name/provider/params/use-case/category).
 - `sort`: `score|tps|params|mem|ctx|date|use_case`.
@@ -204,6 +204,7 @@ limit=5..20
 ### 3) Per-workload targeting
 Examples:
 - Coding workloads: `use_case=coding`
+- Agentic/tool-calling workloads: `use_case=agentic`
 - Embedding workloads: `use_case=embedding`
 - Runtime constrained to llama.cpp fleet: `runtime=llamacpp`
 

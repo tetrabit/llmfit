@@ -475,12 +475,14 @@ fn parse_use_case(raw: Option<&str>) -> Result<Option<UseCase>, ApiError> {
         "coding" | "code" => UseCase::Coding,
         "reasoning" | "reason" => UseCase::Reasoning,
         "chat" => UseCase::Chat,
+        "agentic" | "agent" | "tool" | "tools" | "tool_use" | "tool-use" | "tool_calling"
+        | "function_calling" => UseCase::Agentic,
         "multimodal" | "vision" => UseCase::Multimodal,
         "embedding" | "embed" => UseCase::Embedding,
         "general" => UseCase::General,
         _ => {
             return Err(ApiError::bad_request(
-                "invalid use_case value: use general|coding|reasoning|chat|multimodal|embedding",
+                "invalid use_case value: use general|coding|reasoning|chat|agentic|multimodal|embedding",
             ));
         }
     };

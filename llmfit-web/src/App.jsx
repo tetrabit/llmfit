@@ -24,6 +24,7 @@ const USE_CASE_OPTIONS = [
   { value: 'coding', label: 'Coding' },
   { value: 'reasoning', label: 'Reasoning' },
   { value: 'chat', label: 'Chat' },
+  { value: 'agentic', label: 'Agentic / tools' },
   { value: 'multimodal', label: 'Multimodal' },
   { value: 'embedding', label: 'Embedding' }
 ];
