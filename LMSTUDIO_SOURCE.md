@@ -394,3 +394,148 @@ The correct approach is:
 4. move to field-level precedence instead of single-record truth
 
 If implemented in that order, `llmfit` can stay stable while becoming much more accurate for LM Studio users.
+
+## Agreed Next Feature Branch Plan
+
+This section captures the clarified goal for the next branch.
+
+### User Goal
+
+The immediate goal is not only local installed-model overlays.
+
+The desired outcome is that `llmfit` can:
+
+1. see LM Studio catalog models from `https://lmstudio.ai/models`
+2. use LM Studio-specific metadata when it is more accurate than Hugging Face
+3. download those LM Studio catalog models from the existing TUI download flow
+
+Concrete motivating example:
+
+- LM Studio page: `https://lmstudio.ai/models/nvidia/nemotron-3-nano`
+- desired behavior: `llmfit` should surface that LM Studio model and reflect the LM Studio context window (`1,048,576`) instead of only the Hugging Face-side context metadata
+
+### Revised Scope for the Next Branch
+
+The next feature branch should combine:
+
+- **Phase 2** for LM Studio online metadata refresh of known models
+- the smallest useful subset of **Phase 3** for LM Studio catalog discovery
+
+This is larger than the original local-only Phase 1, but it matches the actual requested user outcome.
+
+### Recommended Delivery Order
+
+#### Step 1 — Add shared overlay support in core
+
+Before any scraping/discovery work, add the data model support needed by both local and online LM Studio metadata:
+
+- add a `ModelMetadataOverlay` attached to `LlmModel`
+- add field-level effective helpers:
+  - `effective_context_length()`
+  - `effective_capabilities()`
+  - `effective_use_case()`
+- defer `effective_format()` unless we have strong evidence it is needed immediately for runtime behavior
+
+This keeps Hugging Face as the base model source while allowing LM Studio metadata to override selected fields safely.
+
+#### Step 2 — Add LM Studio online metadata cache
+
+Extend the existing refresh path in `llmfit-core/src/update.rs` with a second cache file:
+
+- `~/.llmfit/hf_models_cache.json`
+- `~/.llmfit/lmstudio_metadata_cache.json`
+
+The LM Studio cache should store overlays, not full replacement models.
+
+For known models already present in the embedded/HF model list:
+
+- fetch LM Studio page/catalog metadata
+- extract fields like:
+  - canonical key / slug
+  - context length
+  - capabilities
+  - display name / summary
+  - artifact or variant identifiers where available
+- save those as overlays keyed by canonical slug
+
+#### Step 3 — Apply overlays in the shared load path
+
+Do not apply LM Studio metadata only in the TUI.
+
+Create a shared model-loading path so:
+
+- TUI
+- API
+- CLI
+
+all see the same effective model metadata.
+
+This avoids a split-brain state where the TUI shows LM Studio metadata but `serve_api` and CLI still show Hugging Face-only values.
+
+#### Step 4 — Add catalog discovery for LM Studio-only entries
+
+After known-model overlays are working, add the smallest discovery pass that can insert new models from LM Studio when they are not already present from Hugging Face.
+
+Requirements:
+
+- dedupe by canonical slug
+- avoid record-level replacement of HF entries
+- insert new cache-only entries only when there is no existing base model
+- mark discovered entries as LM Studio-derived
+
+This is the step that makes “LM Studio-specific models” actually appear in `llmfit`.
+
+#### Step 5 — Keep download flow aligned with LM Studio keys
+
+Ensure discovered/overlaid LM Studio models retain enough information to use the correct LM Studio download identifier.
+
+This is critical because some LM Studio catalog models use LM Studio-specific keys or mappings that differ from raw Hugging Face repo IDs.
+
+### Initial Acceptance Criteria for the Branch
+
+The next branch should be considered successful when all of the following are true:
+
+1. After refreshing models, `llmfit` can surface LM Studio metadata for known models like `nvidia/nemotron-3-nano`
+2. The Nemotron example reflects the LM Studio context window (`1,048,576`) in fit/UI/API output
+3. New LM Studio catalog entries can appear in the model set even when they are absent from the embedded HF catalog
+4. Downloading an LM Studio-discovered model uses the correct LM Studio identifier or mapping
+5. LM Studio metadata precedence remains field-level, not whole-record replacement
+
+### Known Risks to Handle Explicitly
+
+1. **Fragile scraping**
+   - LM Studio public pages may change
+   - prefer structured data embedded in the page when available
+   - isolate parsing in one helper/module
+
+2. **False slug merges**
+   - one LM Studio artifact can map ambiguously onto a Hugging Face base model
+   - if ambiguous, skip overlay rather than overwrite incorrectly
+
+3. **Download identifier mismatch**
+   - the correct LM Studio download key may differ from the visible Hugging Face repo ID
+   - persist the LM Studio key explicitly when known
+
+4. **Cross-surface inconsistency**
+   - TUI/API/CLI must all read effective metadata from the same shared load path
+
+### Regression Cases to Preserve
+
+At minimum, add branch tests or fixtures covering:
+
+- `nvidia/nemotron-3-nano`
+- `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16`
+- a model where LM Studio capabilities differ from the HF-inferred capabilities
+- a model discovered from LM Studio but not present in the embedded HF catalog
+
+### Branch Strategy
+
+This work should start on a dedicated feature branch after the current local LM Studio/runtime/filter fixes are committed and pushed.
+
+Recommended branch intent:
+
+- isolate the larger LM Studio metadata/catalog work from the already-validated runtime/download fixes
+- allow incremental PRs if the branch naturally splits into:
+  1. core overlay model support
+  2. LM Studio online metadata cache
+  3. LM Studio catalog discovery
