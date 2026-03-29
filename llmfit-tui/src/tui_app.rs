@@ -1,11 +1,12 @@
 use llmfit_core::fit::{FitLevel, ModelFit, SortColumn, backend_compatible};
 use llmfit_core::hardware::SystemSpecs;
-use llmfit_core::models::{Capability, ModelDatabase, UseCase};
+use llmfit_core::models::{Capability, LlmModel, ModelDatabase, UseCase};
 use llmfit_core::plan::{PlanEstimate, PlanRequest, estimate_model_plan};
 use llmfit_core::providers::{
     self, DockerModelRunnerProvider, LlamaCppProvider, LmStudioProvider, MlxProvider,
     ModelProvider, OllamaProvider, PullEvent, PullHandle,
 };
+use llmfit_core::update::{self, UpdateOptions};
 
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc;
@@ -244,6 +245,11 @@ impl ActivePullProvider {
     }
 }
 
+enum CatalogRefreshEvent {
+    Progress(String),
+    Done(Result<(usize, usize), String>),
+}
+
 pub struct App {
     pub should_quit: bool,
     pub input_mode: InputMode,
@@ -252,6 +258,8 @@ pub struct App {
 
     // Data
     pub specs: SystemSpecs,
+    source_models: Vec<LlmModel>,
+    base_context_limit: Option<u32>,
     pub all_fits: Vec<ModelFit>,
     pub filtered_fits: Vec<usize>, // indices into all_fits
     pub providers: Vec<String>,
@@ -331,6 +339,9 @@ pub struct App {
     download_capability_inflight: HashSet<String>,
     download_capability_tx: mpsc::Sender<(String, DownloadCapability)>,
     download_capability_rx: mpsc::Receiver<(String, DownloadCapability)>,
+    catalog_refresh_active: bool,
+    catalog_refresh_tx: mpsc::Sender<CatalogRefreshEvent>,
+    catalog_refresh_rx: mpsc::Receiver<CatalogRefreshEvent>,
     /// Animation frame counter, incremented every tick while pulling.
     pub tick_count: u64,
     /// When true, the next 'd' press will confirm and start the download.
@@ -367,6 +378,120 @@ pub struct App {
 }
 
 impl App {
+    fn preserve_string_selection(
+        previous_items: &[String],
+        previous_selected: &[bool],
+        next_items: &[String],
+    ) -> Vec<bool> {
+        next_items
+            .iter()
+            .map(|item| {
+                previous_items
+                    .iter()
+                    .position(|prev| prev == item)
+                    .and_then(|idx| previous_selected.get(idx).copied())
+                    .unwrap_or(true)
+            })
+            .collect()
+    }
+
+    fn preserve_copy_selection<T: Copy + PartialEq>(
+        previous_items: &[T],
+        previous_selected: &[bool],
+        next_items: &[T],
+    ) -> Vec<bool> {
+        next_items
+            .iter()
+            .map(|item| {
+                previous_items
+                    .iter()
+                    .position(|prev| prev == item)
+                    .and_then(|idx| previous_selected.get(idx).copied())
+                    .unwrap_or(true)
+            })
+            .collect()
+    }
+
+    fn build_fits(
+        models: &[LlmModel],
+        specs: &SystemSpecs,
+        context_limit: Option<u32>,
+        ollama_installed: &HashSet<String>,
+        mlx_installed: &HashSet<String>,
+        llamacpp_installed: &HashSet<String>,
+        docker_mr_installed: &HashSet<String>,
+        lmstudio_installed: &HashSet<String>,
+    ) -> Vec<ModelFit> {
+        models
+            .iter()
+            .map(|m| {
+                let mut fit = ModelFit::analyze_with_context_limit(m, specs, context_limit);
+                fit.installed = providers::is_model_installed(&m.name, ollama_installed)
+                    || providers::is_model_installed_mlx(&m.name, mlx_installed)
+                    || providers::is_model_installed_llamacpp(&m.name, llamacpp_installed)
+                    || providers::is_model_installed_docker_mr(&m.name, docker_mr_installed)
+                    || providers::is_model_installed_lmstudio(&m.name, lmstudio_installed);
+                fit
+            })
+            .collect()
+    }
+
+    fn sync_filter_options_from_all_fits(&mut self) {
+        let mut model_providers: Vec<String> = self
+            .all_fits
+            .iter()
+            .map(|f| f.model.provider.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        model_providers.sort();
+        self.selected_providers = Self::preserve_string_selection(
+            &self.providers,
+            &self.selected_providers,
+            &model_providers,
+        );
+        self.providers = model_providers;
+
+        let model_use_cases = [
+            UseCase::General,
+            UseCase::Coding,
+            UseCase::Reasoning,
+            UseCase::Chat,
+            UseCase::Agentic,
+            UseCase::Multimodal,
+            UseCase::Embedding,
+        ]
+        .into_iter()
+        .filter(|uc| self.all_fits.iter().any(|f| f.use_case == *uc))
+        .collect::<Vec<_>>();
+        self.selected_use_cases = Self::preserve_copy_selection(
+            &self.use_cases,
+            &self.selected_use_cases,
+            &model_use_cases,
+        );
+        self.use_cases = model_use_cases;
+
+        let model_capabilities = Capability::all().to_vec();
+        self.selected_capabilities = Self::preserve_copy_selection(
+            &self.capabilities,
+            &self.selected_capabilities,
+            &model_capabilities,
+        );
+        self.capabilities = model_capabilities;
+
+        let mut model_quants: Vec<String> = self
+            .all_fits
+            .iter()
+            .map(|f| f.best_quant.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        model_quants.sort();
+        self.selected_quants =
+            Self::preserve_string_selection(&self.quants, &self.selected_quants, &model_quants);
+        self.quants = model_quants;
+    }
+
     pub fn with_specs_and_context(specs: SystemSpecs, context_limit: Option<u32>) -> Self {
         let db = ModelDatabase::new();
 
@@ -404,20 +529,23 @@ impl App {
             .count();
 
         // Only analyze models that can actually run on this hardware.
-        let mut all_fits: Vec<ModelFit> = db
+        let source_models: Vec<LlmModel> = db
             .get_all_models()
             .iter()
             .filter(|m| backend_compatible(m, &specs))
-            .map(|m| {
-                let mut fit = ModelFit::analyze_with_context_limit(m, &specs, context_limit);
-                fit.installed = providers::is_model_installed(&m.name, &ollama_installed)
-                    || providers::is_model_installed_mlx(&m.name, &mlx_installed)
-                    || providers::is_model_installed_llamacpp(&m.name, &llamacpp_installed)
-                    || providers::is_model_installed_docker_mr(&m.name, &docker_mr_installed)
-                    || providers::is_model_installed_lmstudio(&m.name, &lmstudio_installed);
-                fit
-            })
+            .cloned()
             .collect();
+
+        let mut all_fits = Self::build_fits(
+            &source_models,
+            &specs,
+            context_limit,
+            &ollama_installed,
+            &mlx_installed,
+            &llamacpp_installed,
+            &docker_mr_installed,
+            &lmstudio_installed,
+        );
 
         // Sort by fit level then RAM usage
         all_fits = llmfit_core::fit::rank_models_by_fit(all_fits);
@@ -482,6 +610,7 @@ impl App {
         let filtered_count = all_fits.len();
 
         let (download_capability_tx, download_capability_rx) = mpsc::channel();
+        let (catalog_refresh_tx, catalog_refresh_rx) = mpsc::channel();
 
         let mut app = App {
             should_quit: false,
@@ -489,6 +618,8 @@ impl App {
             search_query: String::new(),
             cursor_position: 0,
             specs,
+            source_models,
+            base_context_limit: context_limit,
             all_fits,
             filtered_fits: (0..filtered_count).collect(),
             providers: model_providers,
@@ -556,6 +687,9 @@ impl App {
             download_capability_inflight: HashSet::new(),
             download_capability_tx,
             download_capability_rx,
+            catalog_refresh_active: false,
+            catalog_refresh_tx,
+            catalog_refresh_rx,
             tick_count: 0,
             confirm_download: false,
             visual_anchor: None,
@@ -837,7 +971,7 @@ impl App {
 
     pub fn cycle_context_filter(&mut self) {
         self.context_filter = self.context_filter.next();
-        self.apply_filters();
+        self.rebuild_fits();
     }
 
     pub fn cycle_sort_column(&mut self) {
@@ -1500,6 +1634,163 @@ impl App {
         self.apply_filters();
     }
 
+    fn effective_context_limit(&self) -> Option<u32> {
+        match (self.base_context_limit, self.context_filter.min_context()) {
+            (Some(base), Some(ctx)) => Some(base.min(ctx)),
+            (Some(base), None) => Some(base),
+            (None, Some(ctx)) => Some(ctx),
+            (None, None) => None,
+        }
+    }
+
+    fn rebuild_fits(&mut self) {
+        let context_limit = self.effective_context_limit();
+        let fits = Self::build_fits(
+            &self.source_models,
+            &self.specs,
+            context_limit,
+            &self.ollama_installed,
+            &self.mlx_installed,
+            &self.llamacpp_installed,
+            &self.docker_mr_installed,
+            &self.lmstudio_installed,
+        );
+        let mut sorted = llmfit_core::fit::rank_models_by_fit_opts_col(
+            fits,
+            self.installed_first,
+            self.sort_column,
+        );
+        if self.sort_ascending {
+            sorted.reverse();
+        }
+        self.all_fits = sorted;
+        self.sync_filter_options_from_all_fits();
+        self.apply_filters();
+    }
+
+    fn reload_model_catalog(&mut self) {
+        let selected_name = self.selected_fit().map(|fit| fit.model.name.clone());
+        let db = ModelDatabase::new();
+
+        self.backend_hidden_count = db
+            .get_all_models()
+            .iter()
+            .filter(|m| !backend_compatible(m, &self.specs))
+            .count();
+
+        self.source_models = db
+            .get_all_models()
+            .iter()
+            .filter(|m| backend_compatible(m, &self.specs))
+            .cloned()
+            .collect();
+
+        self.compare_models.clear();
+        self.show_compare = false;
+        self.show_multi_compare = false;
+        self.compare_scroll = 0;
+        self.plan_model_idx = None;
+        self.show_plan = false;
+        self.download_capabilities.clear();
+        self.download_capability_inflight.clear();
+
+        self.rebuild_fits();
+
+        if let Some(name) = selected_name
+            && let Some(idx) = self
+                .filtered_fits
+                .iter()
+                .position(|fit_idx| self.all_fits[*fit_idx].model.name == name)
+        {
+            self.selected_row = idx;
+        }
+    }
+
+    pub fn refresh_model_catalog(&mut self) {
+        let specific_models = if self.show_detail {
+            self.selected_fit()
+                .map(|fit| vec![fit.model.name.clone()])
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        self.refresh_model_catalog_with_scope(specific_models);
+    }
+
+    fn refresh_model_catalog_with_scope(&mut self, specific_models: Vec<String>) {
+        if self.catalog_refresh_active {
+            self.pull_status = Some("Model refresh already running".to_string());
+            return;
+        }
+
+        self.catalog_refresh_active = true;
+        self.pull_status = Some(if specific_models.is_empty() {
+            "Refreshing model catalog from HuggingFace...".to_string()
+        } else {
+            format!(
+                "Refreshing {} from HuggingFace...",
+                specific_models.join(", ")
+            )
+        });
+
+        let tx = self.catalog_refresh_tx.clone();
+        std::thread::spawn(move || {
+            let opts = UpdateOptions {
+                token: std::env::var("HF_TOKEN")
+                    .ok()
+                    .or_else(|| std::env::var("HUGGING_FACE_HUB_TOKEN").ok()),
+                refresh_existing: true,
+                trending_limit: if specific_models.is_empty() {
+                    UpdateOptions::default().trending_limit
+                } else {
+                    0
+                },
+                downloads_limit: if specific_models.is_empty() {
+                    UpdateOptions::default().downloads_limit
+                } else {
+                    0
+                },
+                specific_models,
+                ..Default::default()
+            };
+            let result = update::update_model_cache(&opts, |msg| {
+                let _ = tx.send(CatalogRefreshEvent::Progress(msg.to_string()));
+            });
+            let _ = tx.send(CatalogRefreshEvent::Done(result));
+        });
+    }
+
+    fn tick_catalog_refresh(&mut self) {
+        loop {
+            match self.catalog_refresh_rx.try_recv() {
+                Ok(CatalogRefreshEvent::Progress(status)) => {
+                    self.pull_status = Some(status);
+                }
+                Ok(CatalogRefreshEvent::Done(Ok((changed, total)))) => {
+                    self.catalog_refresh_active = false;
+                    self.reload_model_catalog();
+                    self.pull_status = Some(format!(
+                        "Model catalog refreshed: {} updated/new, {} cached total",
+                        changed, total
+                    ));
+                    self.enqueue_capability_probes_for_visible(24);
+                    return;
+                }
+                Ok(CatalogRefreshEvent::Done(Err(err))) => {
+                    self.catalog_refresh_active = false;
+                    self.pull_status = Some(format!("Model refresh failed: {}", err));
+                    return;
+                }
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.catalog_refresh_active = false;
+                    self.pull_status = Some("Model refresh ended".to_string());
+                    return;
+                }
+            }
+        }
+    }
+
     /// Start pulling the currently selected model via the best available provider.
     pub fn start_download(&mut self) {
         let any_available = self.ollama_available
@@ -1692,6 +1983,7 @@ impl App {
     pub fn tick_pull(&mut self) {
         self.enqueue_capability_probes_for_visible(24);
         self.tick_download_capability();
+        self.tick_catalog_refresh();
         if self.pull_active.is_some() {
             self.tick_count = self.tick_count.wrapping_add(1);
         }
@@ -1835,23 +2127,7 @@ impl App {
         let (lmstudio_set, lmstudio_count) = self.lmstudio.installed_models_counted();
         self.lmstudio_installed = lmstudio_set;
         self.lmstudio_installed_count = lmstudio_count;
-        for fit in &mut self.all_fits {
-            fit.installed = providers::is_model_installed(&fit.model.name, &self.ollama_installed)
-                || providers::is_model_installed_mlx(&fit.model.name, &self.mlx_installed)
-                || providers::is_model_installed_llamacpp(
-                    &fit.model.name,
-                    &self.llamacpp_installed,
-                )
-                || providers::is_model_installed_docker_mr(
-                    &fit.model.name,
-                    &self.docker_mr_installed,
-                )
-                || providers::is_model_installed_lmstudio(
-                    &fit.model.name,
-                    &self.lmstudio_installed,
-                );
-        }
-        self.re_sort();
+        self.rebuild_fits();
         self.enqueue_capability_probes_for_visible(24);
     }
 

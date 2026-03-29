@@ -131,6 +131,9 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) {
             app.refresh_installed()
         }
 
+        // Refresh online model metadata and discover new trending models
+        KeyCode::Char('R') => app.refresh_model_catalog(),
+
         // Detail view
         KeyCode::Enter => app.toggle_detail(),
 

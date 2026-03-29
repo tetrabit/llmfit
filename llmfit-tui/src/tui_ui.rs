@@ -2402,9 +2402,12 @@ fn status_keys_and_mode(app: &App) -> (String, String) {
                 } else {
                     "i:installed↑"
                 };
-                format!("  {}  d:pull  r:refresh", installed_key)
+                format!(
+                    "  {}  d:pull  r:refresh runtimes  R:update models",
+                    installed_key
+                )
             } else {
-                String::new()
+                "  R:update models".to_string()
             };
             (
                 format!(
