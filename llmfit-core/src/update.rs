@@ -9,7 +9,8 @@
 //! previously fetched models without needing to rebuild the binary.
 
 use serde::Deserialize;
-use std::collections::HashSet;
+use serde_json::Value;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use crate::models::{LlmModel, ModelFormat};
@@ -268,6 +269,30 @@ fn infer_use_case(model_id: &str, tags: &[String]) -> String {
 
 // ── Context-length inference ──────────────────────────────────────────────────
 
+fn apply_context_family_floor(model_id: &str, context_length: u32) -> u32 {
+    let low = model_id.to_lowercase();
+
+    if low.contains("llama-4") || low.contains("llama4") {
+        return context_length.max(1_048_576);
+    }
+    if low.contains("nemotron-3-nano-30b-a3b") {
+        return context_length.max(1_048_576);
+    }
+    if low.contains("llama-3") || low.contains("llama3") {
+        return context_length.max(131_072);
+    }
+    if low.contains("qwen2") || low.contains("qwen3") {
+        return context_length.max(131_072);
+    }
+    if low.contains("mistral") {
+        return context_length.max(32_768);
+    }
+    if low.contains("gemma") {
+        return context_length.max(8_192);
+    }
+    context_length
+}
+
 fn infer_context_length(model_id: &str, params_raw: Option<u64>) -> u32 {
     let low = model_id.to_lowercase();
     for (kw, ctx) in &[
@@ -279,27 +304,56 @@ fn infer_context_length(model_id: &str, params_raw: Option<u64>) -> u32 {
         ("8k", 8_192),
     ] {
         if low.contains(kw) {
-            return *ctx;
+            return apply_context_family_floor(model_id, *ctx);
         }
     }
-    if low.contains("llama-4") || low.contains("llama4") {
-        return 1_048_576;
-    }
-    if low.contains("llama-3") || low.contains("llama3") {
-        return 131_072;
-    }
-    if low.contains("qwen2") || low.contains("qwen3") || low.contains("mistral") {
-        return 32_768;
-    }
-    if low.contains("gemma") {
-        return 8_192;
-    }
+
     match params_raw {
-        Some(p) if p >= 70_000_000_000 => 32_768,
-        Some(p) if p >= 13_000_000_000 => 16_384,
-        Some(p) if p >= 3_000_000_000 => 8_192,
-        _ => 4_096,
+        Some(p) if p >= 70_000_000_000 => apply_context_family_floor(model_id, 32_768),
+        Some(p) if p >= 13_000_000_000 => apply_context_family_floor(model_id, 16_384),
+        Some(p) if p >= 3_000_000_000 => apply_context_family_floor(model_id, 8_192),
+        _ => apply_context_family_floor(model_id, 4_096),
     }
+}
+
+fn exact_context_length(model_id: &str, config: &Value) -> Option<u32> {
+    let keys = [
+        "max_position_embeddings",
+        "max_sequence_length",
+        "model_max_length",
+        "seq_length",
+        "n_positions",
+        "sliding_window",
+    ];
+
+    for key in keys {
+        if let Some(value) = config.get(key).and_then(Value::as_u64)
+            && let Ok(value) = u32::try_from(value)
+            && value > 0
+        {
+            return Some(apply_context_family_floor(model_id, value));
+        }
+    }
+
+    if let Some(text_config) = config.get("text_config").and_then(Value::as_object) {
+        for key in [
+            "max_position_embeddings",
+            "max_sequence_length",
+            "model_max_length",
+            "seq_length",
+            "n_positions",
+            "sliding_window",
+        ] {
+            if let Some(value) = text_config.get(key).and_then(Value::as_u64)
+                && let Ok(value) = u32::try_from(value)
+                && value > 0
+            {
+                return Some(apply_context_family_floor(model_id, value));
+            }
+        }
+    }
+
+    None
 }
 
 // ── RAM estimation ────────────────────────────────────────────────────────────
@@ -363,9 +417,62 @@ fn hf_get_list(sort: &str, limit: usize, token: Option<&str>) -> Result<Vec<HfAp
     }
 }
 
+fn hf_get_model(repo_id: &str, token: Option<&str>) -> Result<HfApiModel, String> {
+    let url = format!("{}/{}", HF_API, repo_id);
+    let resp = if let Some(t) = token {
+        ureq::get(&url)
+            .header("Authorization", &format!("Bearer {}", t))
+            .config()
+            .timeout_global(Some(std::time::Duration::from_secs(30)))
+            .build()
+            .call()
+    } else {
+        ureq::get(&url)
+            .config()
+            .timeout_global(Some(std::time::Duration::from_secs(30)))
+            .build()
+            .call()
+    };
+    match resp {
+        Ok(r) => r
+            .into_body()
+            .read_json::<HfApiModel>()
+            .map_err(|e| format!("Failed to parse HuggingFace model response: {e}")),
+        Err(e) => Err(format!(
+            "HuggingFace model lookup failed for {repo_id}: {e}"
+        )),
+    }
+}
+
+fn fetch_config_json(repo_id: &str, token: Option<&str>) -> Option<Value> {
+    let url = format!("https://huggingface.co/{repo_id}/resolve/main/config.json");
+    let resp = if let Some(t) = token {
+        ureq::get(&url)
+            .header("Authorization", &format!("Bearer {}", t))
+            .config()
+            .timeout_global(Some(std::time::Duration::from_secs(30)))
+            .build()
+            .call()
+    } else {
+        ureq::get(&url)
+            .config()
+            .timeout_global(Some(std::time::Duration::from_secs(30)))
+            .build()
+            .call()
+    };
+    let Ok(resp) = resp else {
+        return None;
+    };
+    resp.into_body().read_json::<Value>().ok()
+}
+
+fn fetch_precise_context_length(repo_id: &str, token: Option<&str>) -> Option<u32> {
+    fetch_config_json(repo_id, token).and_then(|config| exact_context_length(repo_id, &config))
+}
+
 /// Convert a raw HF API entry into an `LlmModel`.
 /// Returns `None` for models that cannot be characterised as text-generation.
-fn map_to_llm_model(hf: HfApiModel) -> Option<LlmModel> {
+fn map_to_llm_model(hf: HfApiModel, precise_context_length: Option<u32>) -> Option<LlmModel> {
     let is_tg = hf.pipeline_tag.as_deref() == Some("text-generation")
         || hf.tags.iter().any(|t| t == "text-generation");
     if !is_tg {
@@ -405,7 +512,8 @@ fn map_to_llm_model(hf: HfApiModel) -> Option<LlmModel> {
 
     let raw = params_raw.unwrap_or(7_000_000_000);
     let use_case = infer_use_case(&hf.id, &hf.tags);
-    let context_length = infer_context_length(&hf.id, params_raw);
+    let context_length =
+        precise_context_length.unwrap_or_else(|| infer_context_length(&hf.id, params_raw));
     let (min_ram, rec_ram, min_vram) = estimate_ram(raw, is_moe, active_params);
 
     let provider = hf
@@ -447,6 +555,23 @@ fn map_to_llm_model(hf: HfApiModel) -> Option<LlmModel> {
     })
 }
 
+fn fetch_model_metadata(repo_id: &str, token: Option<&str>) -> Result<Option<LlmModel>, String> {
+    let hf = hf_get_model(repo_id, token)?;
+    let precise_context_length = fetch_precise_context_length(repo_id, token);
+    Ok(map_to_llm_model(hf, precise_context_length))
+}
+
+fn upsert_cached_model(cache: &mut HashMap<String, LlmModel>, model: LlmModel) -> bool {
+    let slug = crate::models::canonical_slug(&model.name);
+    match cache.get(&slug) {
+        Some(existing) if existing == &model => false,
+        _ => {
+            cache.insert(slug, model);
+            true
+        }
+    }
+}
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /// Options controlling the update behaviour.
@@ -458,6 +583,12 @@ pub struct UpdateOptions {
     pub downloads_limit: usize,
     /// Optional HuggingFace API token (raises the anonymous rate limit).
     pub token: Option<String>,
+    /// Re-query known catalog models so refreshed metadata can override the
+    /// embedded catalog, not just append new discoveries.
+    pub refresh_existing: bool,
+    /// Optional explicit set of model repo IDs to refresh. When non-empty,
+    /// only these known models are re-queried.
+    pub specific_models: Vec<String>,
 }
 
 impl Default for UpdateOptions {
@@ -466,6 +597,8 @@ impl Default for UpdateOptions {
             trending_limit: 100,
             downloads_limit: 50,
             token: None,
+            refresh_existing: false,
+            specific_models: Vec::new(),
         }
     }
 }
@@ -484,23 +617,63 @@ pub fn update_model_cache(
 ) -> Result<(usize, usize), String> {
     use crate::models::ModelDatabase;
 
-    // Names already embedded in the binary — never add these to the cache.
-    // Use canonical_slug for the same normalization applied in ModelDatabase::new().
-    let embedded_names: HashSet<String> = ModelDatabase::embedded()
-        .get_all_models()
-        .iter()
-        .map(|m| crate::models::canonical_slug(&m.name))
-        .collect();
-
-    // Load the existing cache so we can append to it.
-    let mut cached = load_cache();
-    let already_cached: HashSet<String> = cached
-        .iter()
-        .map(|m| crate::models::canonical_slug(&m.name))
+    let mut cached_by_slug: HashMap<String, LlmModel> = load_cache()
+        .into_iter()
+        .map(|m| (crate::models::canonical_slug(&m.name), m))
         .collect();
 
     let token = opts.token.as_deref();
     let mut all_hf: Vec<HfApiModel> = Vec::new();
+    let mut changed_count = 0usize;
+    let mut fetched_any = false;
+
+    if opts.refresh_existing {
+        let mut known_model_ids: Vec<String> = if opts.specific_models.is_empty() {
+            ModelDatabase::new()
+                .get_all_models()
+                .iter()
+                .map(|m| m.name.clone())
+                .filter(|name| name.contains('/'))
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect()
+        } else {
+            opts.specific_models
+                .iter()
+                .filter(|name| name.contains('/'))
+                .cloned()
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect()
+        };
+        known_model_ids.sort();
+
+        progress(&format!(
+            "Refreshing {} known models from HuggingFace...",
+            known_model_ids.len()
+        ));
+
+        for (idx, repo_id) in known_model_ids.iter().enumerate() {
+            match fetch_model_metadata(repo_id, token) {
+                Ok(Some(model)) => {
+                    fetched_any = true;
+                    if upsert_cached_model(&mut cached_by_slug, model) {
+                        changed_count += 1;
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => progress(&format!("  Warning: refresh failed for {repo_id} — {e}")),
+            }
+
+            if (idx + 1) % 25 == 0 || idx + 1 == known_model_ids.len() {
+                progress(&format!(
+                    "  Refreshed {}/{} known models",
+                    idx + 1,
+                    known_model_ids.len()
+                ));
+            }
+        }
+    }
 
     if opts.trending_limit > 0 {
         progress(&format!(
@@ -509,6 +682,7 @@ pub fn update_model_cache(
         ));
         match hf_get_list("trendingScore", opts.trending_limit, token) {
             Ok(list) => {
+                fetched_any = true;
                 progress(&format!("  Received {} trending models", list.len()));
                 all_hf.extend(list);
             }
@@ -523,6 +697,7 @@ pub fn update_model_cache(
         ));
         match hf_get_list("downloads", opts.downloads_limit, token) {
             Ok(list) => {
+                fetched_any = true;
                 progress(&format!("  Received {} download-ranked models", list.len()));
                 all_hf.extend(list);
             }
@@ -530,7 +705,7 @@ pub fn update_model_cache(
         }
     }
 
-    if all_hf.is_empty() {
+    if !fetched_any {
         return Err("No models fetched — check your internet connection".to_string());
     }
 
@@ -540,26 +715,25 @@ pub fn update_model_cache(
 
     progress(&format!("Processing {} unique models...", all_hf.len()));
 
-    let mut new_count = 0usize;
     for hf in all_hf {
-        let id_slug = crate::models::canonical_slug(&hf.id);
-        if embedded_names.contains(&id_slug) || already_cached.contains(&id_slug) {
-            continue;
-        }
-        if let Some(model) = map_to_llm_model(hf) {
-            cached.push(model);
-            new_count += 1;
+        let precise_context_length = fetch_precise_context_length(&hf.id, token);
+        if let Some(model) = map_to_llm_model(hf, precise_context_length)
+            && upsert_cached_model(&mut cached_by_slug, model)
+        {
+            changed_count += 1;
         }
     }
 
+    let mut cached: Vec<LlmModel> = cached_by_slug.into_values().collect();
+    cached.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     let total = cached.len();
     progress(&format!(
-        "Saving {} cached models ({} new)...",
-        total, new_count
+        "Saving {} cached models ({} updated or added)...",
+        total, changed_count
     ));
     save_cache(&cached)?;
 
-    Ok((new_count, total))
+    Ok((changed_count, total))
 }
 
 #[cfg(test)]
@@ -648,6 +822,14 @@ mod tests {
         assert_eq!(
             infer_context_length("meta-llama/Llama-3.1-8B", None),
             131_072
+        );
+    }
+
+    #[test]
+    fn test_infer_context_length_nemotron_nano() {
+        assert_eq!(
+            infer_context_length("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", None),
+            1_048_576
         );
     }
 

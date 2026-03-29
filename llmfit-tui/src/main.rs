@@ -80,6 +80,8 @@ GGUF weights, and launch inference — all from a single binary.
 GLOBAL FLAGS:
   --json           Output structured JSON on every subcommand (for tool/agent
                    integration). Always exits 0 on success, 1 on error.
+  --refresh-models Fetch refreshed metadata for known models and discover new
+                   trending/download-ranked models before running the command.
   --memory <SIZE>  Override GPU VRAM (e.g. \"32G\", \"32000M\", \"1.5T\").
   --max-context N  Cap context length for memory estimation (tokens).
                    Falls back to OLLAMA_CONTEXT_LENGTH env var if unset.
@@ -115,6 +117,10 @@ struct Cli {
     /// Output results as JSON (for tool integration)
     #[arg(long, global = true)]
     json: bool,
+
+    /// Refresh model metadata from HuggingFace before running.
+    #[arg(long, global = true)]
+    refresh_models: bool,
 
     /// Override GPU VRAM size (e.g. "32G", "32000M", "1.5T").
     /// Useful when GPU memory autodetection fails.
@@ -1406,6 +1412,8 @@ fn run_update(trending: usize, downloads: usize, token: Option<String>, status: 
         trending_limit: trending,
         downloads_limit: downloads,
         token: resolved_token,
+        refresh_existing: true,
+        specific_models: Vec::new(),
     };
 
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
@@ -1418,9 +1426,9 @@ fn run_update(trending: usize, downloads: usize, token: Option<String>, status: 
             println!();
             println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
             if new_count > 0 {
-                println!("  Added {} new model(s) to the cache.", new_count);
+                println!("  Updated or added {} model(s) in the cache.", new_count);
             } else {
-                println!("  No new models found — cache is up to date.");
+                println!("  No metadata changes found — cache is up to date.");
             }
             println!("  Total cached: {}", total);
             if let Some(p) = update::cache_file() {
@@ -1435,6 +1443,21 @@ fn run_update(trending: usize, downloads: usize, token: Option<String>, status: 
             std::process::exit(1);
         }
     }
+}
+
+fn resolve_hf_token(token: Option<String>) -> Option<String> {
+    token
+        .or_else(|| std::env::var("HF_TOKEN").ok())
+        .or_else(|| std::env::var("HUGGING_FACE_HUB_TOKEN").ok())
+}
+
+fn refresh_models_now(progress: impl Fn(&str)) -> Result<(usize, usize), String> {
+    let opts = llmfit_core::update::UpdateOptions {
+        token: resolve_hf_token(None),
+        refresh_existing: true,
+        ..Default::default()
+    };
+    llmfit_core::update::update_model_cache(&opts, progress)
 }
 
 fn run_hf_search(query: &str, limit: usize) {
@@ -1594,6 +1617,12 @@ fn run_plan(
 
 fn main() {
     let cli = Cli::parse();
+    if cli.refresh_models && !matches!(cli.command.as_ref(), Some(Commands::Update { .. })) {
+        if let Err(err) = refresh_models_now(|msg| eprintln!("{}", msg)) {
+            eprintln!("Model refresh failed: {}", err);
+            std::process::exit(1);
+        }
+    }
     let context_limit = resolve_context_limit(cli.max_context);
     let auto_dashboard = !cli.no_dashboard
         && !cli.json

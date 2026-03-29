@@ -311,6 +311,8 @@ fn normalized_context_length(name: &str, context_length: u32) -> u32 {
 
     let family_floor = if lower.contains("llama-4") || lower.contains("llama4") {
         Some(1_048_576)
+    } else if lower.contains("nemotron-3-nano-30b-a3b") {
+        Some(1_048_576)
     } else if lower.contains("llama-3") || lower.contains("llama3") {
         Some(131_072)
     } else if lower.contains("qwen3") || lower.contains("qwen2.5") {
@@ -330,7 +332,7 @@ fn finalize_model(mut model: LlmModel) -> LlmModel {
     model
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LlmModel {
     pub name: String,
     pub provider: String,
@@ -371,7 +373,7 @@ pub struct LlmModel {
 }
 
 /// A known GGUF download source for a model on HuggingFace.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GgufSource {
     /// HuggingFace repo ID (e.g. "unsloth/Llama-3.1-8B-Instruct-GGUF")
     pub repo: String,
@@ -628,26 +630,13 @@ impl ModelDatabase {
 
     /// Load the embedded model list **and** merge any locally cached models.
     ///
-    /// Cached models are appended after the embedded ones; if an ID already
-    /// exists in the embedded list it is skipped to avoid duplication.
+    /// Cached models override embedded entries when the same canonical model ID
+    /// is present, then any cache-only models are appended.
     /// Silently ignores a missing or corrupt cache file.
     pub fn new() -> Self {
-        let mut models = load_embedded();
-
-        // Merge cached models (from `llmfit update`) without duplicating.
-        // canonical_slug normalizes org/ prefix, case, and separators so that
-        // e.g. `meta-llama/Llama-3.1-8B` and `meta-llama/llama-3.1-8b` are
-        // treated as the same model.
-        let embedded_keys: std::collections::HashSet<String> =
-            models.iter().map(|m| canonical_slug(&m.name)).collect();
-
-        for cached in crate::update::load_cache() {
-            if !embedded_keys.contains(&canonical_slug(&cached.name)) {
-                models.push(finalize_model(cached));
-            }
+        ModelDatabase {
+            models: merge_cached_models(load_embedded(), crate::update::load_cache()),
         }
-
-        ModelDatabase { models }
     }
 
     pub fn get_all_models(&self) -> &Vec<LlmModel> {
@@ -698,6 +687,23 @@ impl ModelDatabase {
             })
             .collect()
     }
+}
+
+fn merge_cached_models(mut embedded: Vec<LlmModel>, cached_models: Vec<LlmModel>) -> Vec<LlmModel> {
+    let mut cached_by_slug = cached_models
+        .into_iter()
+        .map(finalize_model)
+        .map(|m| (canonical_slug(&m.name), m))
+        .collect::<std::collections::HashMap<_, _>>();
+
+    for model in &mut embedded {
+        if let Some(cached) = cached_by_slug.remove(&canonical_slug(&model.name)) {
+            *model = cached;
+        }
+    }
+
+    embedded.extend(cached_by_slug.into_values());
+    embedded
 }
 
 /// Infer attention and KV head counts from the model name and parameter count.
@@ -1308,6 +1314,14 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_normalized_context_length_raises_nemotron_nano_floor() {
+        assert_eq!(
+            normalized_context_length("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", 262_144),
+            1_048_576
+        );
+    }
+
     // ────────────────────────────────────────────────────────────────────
     // ModelDatabase tests
     // ────────────────────────────────────────────────────────────────────
@@ -1534,7 +1548,7 @@ mod tests {
 
     #[test]
     fn test_catalog_popular_models_have_gguf_sources() {
-        let db = ModelDatabase::new();
+        let db = ModelDatabase::embedded();
         // These popular models should have gguf_sources populated in the catalog
         let expected_with_gguf = [
             "meta-llama/Llama-3.3-70B-Instruct",
@@ -1557,7 +1571,7 @@ mod tests {
 
     #[test]
     fn test_catalog_gguf_sources_have_valid_repos() {
-        let db = ModelDatabase::new();
+        let db = ModelDatabase::embedded();
         for model in db.get_all_models() {
             for source in &model.gguf_sources {
                 assert!(
@@ -1583,7 +1597,7 @@ mod tests {
 
     #[test]
     fn test_catalog_has_significant_gguf_coverage() {
-        let db = ModelDatabase::new();
+        let db = ModelDatabase::embedded();
         let total = db.get_all_models().len();
         let with_gguf = db
             .get_all_models()

@@ -434,10 +434,20 @@ def infer_use_case(repo_id: str, pipeline_tag: str | None, config: dict | None) 
     return "General purpose"
 
 
-def infer_context_length(config: dict | None) -> int:
+def normalize_context_length(repo_id: str, context_length: int) -> int:
+    """Raise stale config defaults to known family-level context ceilings."""
+    rid = repo_id.lower()
+
+    if "nemotron-3-nano-30b-a3b" in rid:
+        return max(context_length, 1_048_576)
+
+    return context_length
+
+
+def infer_context_length(repo_id: str, config: dict | None) -> int:
     """Try to extract context length from model config."""
     if not config:
-        return 4096
+        return normalize_context_length(repo_id, 4096)
 
     # Common config keys for max sequence length
     keys_to_check = [
@@ -453,7 +463,7 @@ def infer_context_length(config: dict | None) -> int:
         if key in config:
             val = config[key]
             if isinstance(val, int) and val > 0:
-                return val
+                return normalize_context_length(repo_id, val)
 
     # For multimodal models (e.g., Qwen3.5), check text_config
     if "text_config" in config and isinstance(config["text_config"], dict):
@@ -461,9 +471,9 @@ def infer_context_length(config: dict | None) -> int:
             if key in config["text_config"]:
                 val = config["text_config"][key]
                 if isinstance(val, int) and val > 0:
-                    return val
+                    return normalize_context_length(repo_id, val)
 
-    return 4096
+    return normalize_context_length(repo_id, 4096)
 
 
 def fetch_config_json(repo_id: str) -> dict | None:
@@ -635,7 +645,11 @@ def scrape_model(repo_id: str) -> dict | None:
 
     # Detect quantization format from config.json
     model_format, default_quant = detect_quant_format(repo_id, full_config)
-    context_length = infer_context_length(full_config) if full_config else infer_context_length(config)
+    context_length = (
+        infer_context_length(repo_id, full_config)
+        if full_config
+        else infer_context_length(repo_id, config)
+    )
 
     min_ram, rec_ram = estimate_ram(total_params, default_quant)
     min_vram = estimate_vram(total_params, default_quant)
