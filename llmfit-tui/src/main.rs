@@ -6,6 +6,7 @@ mod tui_events;
 mod tui_ui;
 
 use clap::{Parser, Subcommand};
+use std::ffi::OsString;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::process::Stdio;
 use std::thread;
@@ -18,6 +19,7 @@ use llmfit_core::plan::{PlanRequest, estimate_model_plan, resolve_model_selector
 
 const DEFAULT_DASHBOARD_HOST: &str = "0.0.0.0";
 const DEFAULT_DASHBOARD_PORT: u16 = 8787;
+const DEFAULT_ENV_FILE_NAME: &str = "llmfit.env";
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug)]
 enum SortArg {
@@ -1615,7 +1617,89 @@ fn run_plan(
     Ok(())
 }
 
+fn default_env_file_path() -> Option<std::path::PathBuf> {
+    llmfit_core::update::cache_dir().map(|dir| dir.join(DEFAULT_ENV_FILE_NAME))
+}
+
+fn strip_wrapping_quotes(value: &str) -> &str {
+    if value.len() >= 2 {
+        let bytes = value.as_bytes();
+        let first = bytes[0];
+        let last = bytes[value.len() - 1];
+        if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
+            return &value[1..value.len() - 1];
+        }
+    }
+    value
+}
+
+fn parse_env_assignment(line: &str) -> Option<(String, String)> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() || trimmed.starts_with('#') {
+        return None;
+    }
+
+    let without_export = trimmed.strip_prefix("export ").unwrap_or(trimmed).trim();
+    let (key, value) = without_export.split_once('=')?;
+    let key = key.trim();
+    if key.is_empty() {
+        return None;
+    }
+
+    let value = strip_wrapping_quotes(value.trim()).to_string();
+    Some((key.to_string(), value))
+}
+
+fn load_llmfit_env_file() {
+    let env_path = std::env::var_os("LLMFIT_ENV_FILE")
+        .map(std::path::PathBuf::from)
+        .or_else(default_env_file_path);
+
+    let Some(env_path) = env_path else {
+        return;
+    };
+    if !env_path.exists() {
+        return;
+    }
+
+    let content = match std::fs::read_to_string(&env_path) {
+        Ok(content) => content,
+        Err(err) => {
+            eprintln!(
+                "Warning: could not read env file '{}': {}",
+                env_path.display(),
+                err
+            );
+            return;
+        }
+    };
+
+    for (line_no, line) in content.lines().enumerate() {
+        let Some((key, value)) = parse_env_assignment(line) else {
+            let trimmed = line.trim();
+            if !trimmed.is_empty() && !trimmed.starts_with('#') && !trimmed.contains('=') {
+                eprintln!(
+                    "Warning: ignoring invalid env line {} in '{}'",
+                    line_no + 1,
+                    env_path.display()
+                );
+            }
+            continue;
+        };
+
+        if std::env::var_os(&key).is_none() {
+            // SAFETY: This runs once during process startup before any worker
+            // threads are spawned, so mutating the process environment here is
+            // safe and gives CLI/env-file configuration a predictable order.
+            unsafe {
+                std::env::set_var(&key, OsString::from(value));
+            }
+        }
+    }
+}
+
 fn main() {
+    load_llmfit_env_file();
     let cli = Cli::parse();
     if cli.refresh_models && !matches!(cli.command.as_ref(), Some(Commands::Update { .. })) {
         if let Err(err) = refresh_models_now(|msg| eprintln!("{}", msg)) {
@@ -1952,5 +2036,27 @@ mod tests {
             find_name_index_by_selector(&models, "Qwen/Qwen3-Coder-Next", |m| m.name.as_str())
                 .expect("should resolve exact model");
         assert_eq!(idx, 1);
+    }
+
+    #[test]
+    fn parse_env_assignment_supports_export_and_quotes() {
+        assert_eq!(
+            parse_env_assignment("export HF_TOKEN=\"hf_abc123\""),
+            Some(("HF_TOKEN".to_string(), "hf_abc123".to_string()))
+        );
+        assert_eq!(
+            parse_env_assignment("LMSTUDIO_HOST='http://127.0.0.1:1234'"),
+            Some((
+                "LMSTUDIO_HOST".to_string(),
+                "http://127.0.0.1:1234".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn parse_env_assignment_ignores_comments_and_invalid_lines() {
+        assert_eq!(parse_env_assignment("# comment"), None);
+        assert_eq!(parse_env_assignment("   "), None);
+        assert_eq!(parse_env_assignment("not valid"), None);
     }
 }

@@ -337,6 +337,34 @@ llmfit --max-context 16384 recommend --json --limit 5
 
 If `--max-context` is not set, llmfit will use `OLLAMA_CONTEXT_LENGTH` when available.
 
+### Startup env file
+
+`llmfit` can load a simple env file at startup so you do not need to export the same variables in every shell.
+
+Default path:
+
+```sh
+~/.llmfit/llmfit.env
+```
+
+Supported format:
+
+```sh
+HF_TOKEN=hf_your_token_here
+LMSTUDIO_HOST=http://127.0.0.1:1234
+OLLAMA_CONTEXT_LENGTH=131072
+LLMFIT_MODELS_DIR=/path/to/models
+```
+
+Notes:
+
+- blank lines and lines starting with `#` are ignored
+- `export KEY=value` also works
+- existing shell env vars take precedence over the file
+- set `LLMFIT_ENV_FILE` to use a different file path
+
+This is useful for `HF_TOKEN` / `HUGGING_FACE_HUB_TOKEN`, LM Studio host overrides, and other `llmfit` env-based settings.
+
 ### JSON output
 
 Add `--json` to any subcommand for machine-readable output:
