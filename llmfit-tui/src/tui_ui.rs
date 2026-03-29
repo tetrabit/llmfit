@@ -16,6 +16,7 @@ use crate::tui_app::{
 };
 use llmfit_core::fit::{FitLevel, ModelFit, SortColumn};
 use llmfit_core::hardware::is_running_in_wsl;
+use llmfit_core::models::format_context_length;
 use llmfit_core::providers;
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
@@ -140,10 +141,7 @@ fn draw_system_bar(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
         if app.llamacpp_detection_hint.is_empty() {
             format!("llama.cpp: ✓ ({} models)", app.llamacpp_installed_count)
         } else {
-            format!(
-                "llama.cpp: ✓ ({})",
-                app.llamacpp_detection_hint
-            )
+            format!("llama.cpp: ✓ ({})", app.llamacpp_detection_hint)
         }
     } else if !app.llamacpp_installed.is_empty() {
         format!("llama.cpp: ({} cached)", app.llamacpp_installed_count)
@@ -251,15 +249,16 @@ fn draw_search_and_filters(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeC
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Min(30),    // search
-            Constraint::Length(18), // provider summary
-            Constraint::Length(18), // use-case summary
-            Constraint::Length(16), // capability summary
-            Constraint::Length(18), // sort column
-            Constraint::Length(20), // fit filter
-            Constraint::Length(20), // availability filter
-            Constraint::Length(14), // TP filter
-            Constraint::Length(16), // theme
+            Constraint::Min(24),    // search
+            Constraint::Length(16), // provider summary
+            Constraint::Length(14), // use-case summary
+            Constraint::Length(12), // capability summary
+            Constraint::Length(14), // sort column
+            Constraint::Length(14), // fit filter
+            Constraint::Length(14), // availability filter
+            Constraint::Length(10), // TP filter
+            Constraint::Length(12), // context filter
+            Constraint::Length(12), // theme
         ])
         .split(area);
 
@@ -460,6 +459,24 @@ fn draw_search_and_filters(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeC
         Paragraph::new(Line::from(Span::styled(app.tp_filter.label(), tp_style))).block(tp_block);
     frame.render_widget(tp_text, chunks[7]);
 
+    // Context filter
+    use crate::tui_app::ContextFilter;
+    let context_style = match app.context_filter {
+        ContextFilter::All => Style::default().fg(tc.fg),
+        _ => Style::default().fg(tc.accent_secondary),
+    };
+    let context_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(tc.border))
+        .title(" Ctx [K] ")
+        .title_style(Style::default().fg(tc.muted));
+    let context_text = Paragraph::new(Line::from(Span::styled(
+        app.context_filter.label(),
+        context_style,
+    )))
+    .block(context_block);
+    frame.render_widget(context_text, chunks[8]);
+
     // Theme indicator
     let theme_block = Block::default()
         .borders(Borders::ALL)
@@ -472,7 +489,7 @@ fn draw_search_and_filters(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeC
         Style::default().fg(tc.info),
     )))
     .block(theme_block);
-    frame.render_widget(theme_text, chunks[8]);
+    frame.render_widget(theme_text, chunks[9]);
 }
 
 fn fit_color(level: FitLevel, tc: &ThemeColors) -> Color {
@@ -672,7 +689,7 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect, tc: &ThemeColors) {
                 Cell::from(fit.run_mode_text().to_string()).style(Style::default().fg(mode_color)),
                 Cell::from(format!("{:.0}%", fit.utilization_pct))
                     .style(Style::default().fg(color)),
-                Cell::from(format!("{}k", fit.model.context_length / 1000))
+                Cell::from(format_context_length(fit.model.context_length))
                     .style(Style::default().fg(tc.muted)),
                 Cell::from(
                     fit.model
@@ -1261,7 +1278,7 @@ fn draw_multi_compare(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors
         label: "Context",
         values: visible_models
             .iter()
-            .map(|m| format!("{}k", m.model.context_length / 1000))
+            .map(|m| format_context_length(m.model.context_length))
             .collect(),
         styles: visible_models
             .iter()
@@ -2391,7 +2408,7 @@ fn status_keys_and_mode(app: &App) -> (String, String) {
             };
             (
                 format!(
-                    " ↑↓/jk:nav  {}  /:search  f:fit  s:sort  v:visual  V:select  t:theme  p:plan  m:mark  c:compare  x:clear mark  y:copy{}  P:providers  U:use cases  C:caps  q:quit  tok/s*:est",
+                    " ↑↓/jk:nav  {}  /:search  f:fit  K:ctx  s:sort  v:visual  V:select  t:theme  p:plan  m:mark  c:compare  x:clear mark  y:copy{}  P:providers  U:use cases  C:caps  q:quit  tok/s*:est",
                     detail_key, ollama_keys,
                 ),
                 "NORMAL".to_string(),

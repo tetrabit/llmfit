@@ -151,6 +151,58 @@ impl TpFilter {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextFilter {
+    All,
+    AtLeast32k,
+    AtLeast40k,
+    AtLeast128k,
+    AtLeast131k,
+    AtLeast262k,
+    AtLeast512k,
+    AtLeast1m,
+}
+
+impl ContextFilter {
+    pub fn label(&self) -> &str {
+        match self {
+            ContextFilter::All => "All",
+            ContextFilter::AtLeast32k => ">=32k",
+            ContextFilter::AtLeast40k => ">=40k",
+            ContextFilter::AtLeast128k => ">=128k",
+            ContextFilter::AtLeast131k => ">=131k",
+            ContextFilter::AtLeast262k => ">=262k",
+            ContextFilter::AtLeast512k => ">=512k",
+            ContextFilter::AtLeast1m => ">=1M",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            ContextFilter::All => ContextFilter::AtLeast32k,
+            ContextFilter::AtLeast32k => ContextFilter::AtLeast40k,
+            ContextFilter::AtLeast40k => ContextFilter::AtLeast128k,
+            ContextFilter::AtLeast128k => ContextFilter::AtLeast131k,
+            ContextFilter::AtLeast131k => ContextFilter::AtLeast262k,
+            ContextFilter::AtLeast262k => ContextFilter::AtLeast512k,
+            ContextFilter::AtLeast512k => ContextFilter::AtLeast1m,
+            ContextFilter::AtLeast1m => ContextFilter::All,
+        }
+    }
+
+    pub fn min_context(self) -> Option<u32> {
+        match self {
+            ContextFilter::All => None,
+            ContextFilter::AtLeast32k => Some(32_768),
+            ContextFilter::AtLeast40k => Some(40_960),
+            ContextFilter::AtLeast128k | ContextFilter::AtLeast131k => Some(131_072),
+            ContextFilter::AtLeast262k => Some(262_144),
+            ContextFilter::AtLeast512k => Some(524_288),
+            ContextFilter::AtLeast1m => Some(1_048_576),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DownloadProvider {
     Ollama,
     Mlx,
@@ -213,6 +265,7 @@ pub struct App {
     pub fit_filter: FitFilter,
     pub availability_filter: AvailabilityFilter,
     pub tp_filter: TpFilter,
+    pub context_filter: ContextFilter,
     pub installed_first: bool,
     pub sort_column: SortColumn,
     pub sort_ascending: bool,
@@ -447,6 +500,7 @@ impl App {
             fit_filter: FitFilter::All,
             availability_filter: AvailabilityFilter::All,
             tp_filter: TpFilter::All,
+            context_filter: ContextFilter::All,
             installed_first: false,
             sort_column: SortColumn::Score,
             sort_ascending: false,
@@ -545,18 +599,31 @@ impl App {
                         .map(|c| c.label().to_lowercase())
                         .collect::<Vec<_>>()
                         .join(" ");
+                    let context_text = format!(
+                        "{} {}",
+                        fit.model.context_length,
+                        llmfit_core::models::format_context_length(fit.model.context_length)
+                            .to_lowercase()
+                    );
                     // Combine all searchable fields into one string
                     let searchable = format!(
-                        "{} {} {} {} {} {}",
+                        "{} {} {} {} {} {} {}",
                         fit.model.name.to_lowercase(),
                         fit.model.provider.to_lowercase(),
                         fit.model.parameter_count.to_lowercase(),
                         fit.model.use_case.to_lowercase(),
                         fit.use_case.label().to_lowercase(),
-                        caps_text
+                        caps_text,
+                        context_text,
                     );
                     // All terms must be present (AND logic)
-                    terms.iter().all(|term| searchable.contains(term))
+                    terms.iter().all(|term| {
+                        searchable.contains(term)
+                            || llmfit_core::models::context_matches_search_term(
+                                term,
+                                fit.model.context_length,
+                            )
+                    })
                 };
 
                 // Provider filter
@@ -663,6 +730,11 @@ impl App {
                 };
 
                 let matches_tp = self.tp_filter.matches(&fit.model);
+                let matches_context = self
+                    .context_filter
+                    .min_context()
+                    .map(|min_context| fit.model.context_length >= min_context)
+                    .unwrap_or(true);
 
                 matches_search
                     && matches_provider
@@ -674,6 +746,7 @@ impl App {
                     && matches_run_mode
                     && matches_params_bucket
                     && matches_tp
+                    && matches_context
             })
             .map(|(i, _)| i)
             .collect();
@@ -759,6 +832,11 @@ impl App {
 
     pub fn cycle_tp_filter(&mut self) {
         self.tp_filter = self.tp_filter.next();
+        self.apply_filters();
+    }
+
+    pub fn cycle_context_filter(&mut self) {
+        self.context_filter = self.context_filter.next();
         self.apply_filters();
     }
 
@@ -1277,7 +1355,7 @@ impl App {
                 self.input_mode = InputMode::RunModePopup;
             } // Mode
             9 => self.set_or_toggle_sort(SortColumn::MemPct), // Mem%
-            10 => self.set_or_toggle_sort(SortColumn::Ctx), // Ctx
+            10 => self.cycle_context_filter(),     // Ctx
             11 => self.set_or_toggle_sort(SortColumn::ReleaseDate), // Date
             12 => self.cycle_fit_filter(),         // Fit
             13 => {

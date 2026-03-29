@@ -82,6 +82,9 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) {
         // TP compatibility filter
         KeyCode::Char('T') => app.cycle_tp_filter(),
 
+        // Minimum context filter
+        KeyCode::Char('K') => app.cycle_context_filter(),
+
         // Sort column
         KeyCode::Char('s') => app.cycle_sort_column(),
 

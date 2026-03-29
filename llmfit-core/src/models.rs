@@ -224,6 +224,112 @@ impl UseCase {
     }
 }
 
+pub fn format_context_length(context_length: u32) -> String {
+    match context_length {
+        1_048_576 => "1M".to_string(),
+        524_288 => "512k".to_string(),
+        262_144 => "262k".to_string(),
+        131_072 => "131k".to_string(),
+        65_536 => "65k".to_string(),
+        40_960 => "40k".to_string(),
+        32_768 => "32k".to_string(),
+        16_384 => "16k".to_string(),
+        8_192 => "8k".to_string(),
+        _ if context_length >= 1_000_000 => {
+            let millions = context_length as f64 / 1_000_000.0;
+            if (millions - millions.round()).abs() < 0.05 {
+                format!("{:.0}M", millions)
+            } else {
+                format!("{millions:.1}M")
+            }
+        }
+        _ if context_length >= 1_000 => format!("{}k", context_length / 1_000),
+        _ => context_length.to_string(),
+    }
+}
+
+pub fn parse_context_query_threshold(raw: &str) -> Option<u32> {
+    let normalized = raw.trim().to_lowercase().replace(['_', ',', ' '], "");
+    let normalized = normalized
+        .strip_prefix("context:")
+        .or_else(|| normalized.strip_prefix("ctx:"))
+        .or_else(|| normalized.strip_prefix(">="))
+        .or_else(|| normalized.strip_prefix("minctx:"))
+        .or_else(|| normalized.strip_prefix("atleast:"))
+        .unwrap_or(&normalized);
+
+    match normalized {
+        "32k" | "32768" => Some(32_768),
+        "40k" | "40960" => Some(40_960),
+        "128k" | "131k" | "131072" => Some(131_072),
+        "256k" | "262k" | "262144" => Some(262_144),
+        "512k" | "524288" => Some(524_288),
+        "1m" | "1048k" | "1048576" => Some(1_048_576),
+        _ => None,
+    }
+}
+
+pub fn context_matches_search_term(term: &str, context_length: u32) -> bool {
+    if let Some(min_context) = parse_context_query_threshold(term) {
+        return context_length >= min_context;
+    }
+
+    let context_text = format!(
+        "{} {} tokens",
+        context_length,
+        format_context_length(context_length).to_lowercase()
+    );
+    context_text.contains(&term.to_lowercase())
+}
+
+fn normalized_context_length(name: &str, context_length: u32) -> u32 {
+    let lower = name.to_lowercase();
+
+    let explicit = if lower.contains("10m") {
+        Some(10_485_760)
+    } else if lower.contains("1m") {
+        Some(1_048_576)
+    } else if lower.contains("512k") {
+        Some(524_288)
+    } else if lower.contains("262k") || lower.contains("256k") {
+        Some(262_144)
+    } else if lower.contains("131k") || lower.contains("128k") {
+        Some(131_072)
+    } else if lower.contains("64k") {
+        Some(65_536)
+    } else if lower.contains("40k") {
+        Some(40_960)
+    } else if lower.contains("32k") {
+        Some(32_768)
+    } else if lower.contains("16k") {
+        Some(16_384)
+    } else if lower.contains("8k") {
+        Some(8_192)
+    } else {
+        None
+    };
+
+    let family_floor = if lower.contains("llama-4") || lower.contains("llama4") {
+        Some(1_048_576)
+    } else if lower.contains("llama-3") || lower.contains("llama3") {
+        Some(131_072)
+    } else if lower.contains("qwen3") || lower.contains("qwen2.5") {
+        Some(131_072)
+    } else {
+        None
+    };
+
+    context_length
+        .max(explicit.unwrap_or(0))
+        .max(family_floor.unwrap_or(0))
+}
+
+fn finalize_model(mut model: LlmModel) -> LlmModel {
+    model.context_length = normalized_context_length(&model.name, model.context_length);
+    model.capabilities = Capability::infer(&model);
+    model
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmModel {
     pub name: String,
@@ -484,7 +590,7 @@ fn load_embedded() -> Vec<LlmModel> {
     entries
         .into_iter()
         .map(|e| {
-            let mut model = LlmModel {
+            let model = LlmModel {
                 name: e.name,
                 provider: e.provider,
                 parameter_count: e.parameter_count,
@@ -506,8 +612,7 @@ fn load_embedded() -> Vec<LlmModel> {
                 num_attention_heads: None,
                 num_key_value_heads: None,
             };
-            model.capabilities = Capability::infer(&model);
-            model
+            finalize_model(model)
         })
         .collect()
 }
@@ -538,7 +643,7 @@ impl ModelDatabase {
 
         for cached in crate::update::load_cache() {
             if !embedded_keys.contains(&canonical_slug(&cached.name)) {
-                models.push(cached);
+                models.push(finalize_model(cached));
             }
         }
 
@@ -557,6 +662,7 @@ impl ModelDatabase {
                 m.name.to_lowercase().contains(&query_lower)
                     || m.provider.to_lowercase().contains(&query_lower)
                     || m.parameter_count.to_lowercase().contains(&query_lower)
+                    || context_matches_search_term(&query_lower, m.context_length)
             })
             .collect()
     }
@@ -1141,6 +1247,65 @@ mod tests {
             num_key_value_heads: None,
         };
         assert_eq!(UseCase::from_model(&model), UseCase::Reasoning);
+    }
+
+    #[test]
+    fn test_use_case_from_model_agentic() {
+        let model = LlmModel {
+            name: "Qwen/Qwen2.5-7B-Instruct".to_string(),
+            provider: "Qwen".to_string(),
+            parameter_count: "7B".to_string(),
+            parameters_raw: Some(7_000_000_000),
+            min_ram_gb: 4.0,
+            recommended_ram_gb: 8.0,
+            min_vram_gb: Some(4.0),
+            quantization: "Q4_K_M".to_string(),
+            context_length: 32768,
+            use_case: "Agents, tool use, function calling".to_string(),
+            is_moe: false,
+            num_experts: None,
+            active_experts: None,
+            active_parameters: None,
+            release_date: None,
+            gguf_sources: vec![],
+            capabilities: vec![Capability::ToolUse],
+            format: ModelFormat::default(),
+            num_attention_heads: None,
+            num_key_value_heads: None,
+        };
+        assert_eq!(UseCase::from_model(&model), UseCase::Agentic);
+    }
+
+    #[test]
+    fn test_format_context_length_common_denominators() {
+        assert_eq!(format_context_length(32_768), "32k");
+        assert_eq!(format_context_length(40_960), "40k");
+        assert_eq!(format_context_length(131_072), "131k");
+        assert_eq!(format_context_length(262_144), "262k");
+        assert_eq!(format_context_length(1_048_576), "1M");
+    }
+
+    #[test]
+    fn test_parse_context_query_threshold_aliases() {
+        assert_eq!(parse_context_query_threshold("32k"), Some(32_768));
+        assert_eq!(parse_context_query_threshold("ctx:128k"), Some(131_072));
+        assert_eq!(parse_context_query_threshold(">=262k"), Some(262_144));
+        assert_eq!(parse_context_query_threshold("1m"), Some(1_048_576));
+    }
+
+    #[test]
+    fn test_context_matches_search_term_uses_thresholds() {
+        assert!(context_matches_search_term("128k", 262_144));
+        assert!(context_matches_search_term("ctx:1m", 1_048_576));
+        assert!(!context_matches_search_term("1m", 524_288));
+    }
+
+    #[test]
+    fn test_normalized_context_length_raises_qwen3_floor() {
+        assert_eq!(
+            normalized_context_length("Qwen/Qwen3-14B-AWQ", 40_960),
+            131_072
+        );
     }
 
     // ────────────────────────────────────────────────────────────────────

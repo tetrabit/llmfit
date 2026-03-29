@@ -1,7 +1,7 @@
 use colored::*;
 use llmfit_core::fit::{FitLevel, ModelFit, SortColumn};
 use llmfit_core::hardware::SystemSpecs;
-use llmfit_core::models::LlmModel;
+use llmfit_core::models::{LlmModel, format_context_length};
 use llmfit_core::plan::PlanEstimate;
 use tabled::{Table, Tabled, settings::Style};
 
@@ -85,7 +85,7 @@ pub fn display_all_models(models: &[LlmModel], sort: SortColumn) {
             runtime: "-".to_string(),
             mode: "-".to_string(),
             mem_use: "-".to_string(),
-            context: format!("{}k", m.context_length / 1000),
+            context: format_context_length(m.context_length),
             release_date: m
                 .release_date
                 .clone()
@@ -125,7 +125,7 @@ pub fn display_model_fits(fits: &[ModelFit]) {
                 runtime: fit.runtime_text().to_string(),
                 mode: fit.run_mode_text().to_string(),
                 mem_use: format!("{:.1}%", fit.utilization_pct),
-                context: format!("{}k", fit.model.context_length / 1000),
+                context: format_context_length(fit.model.context_length),
                 release_date: fit
                     .model
                     .release_date
@@ -437,7 +437,7 @@ pub fn display_search_results(models: &[&LlmModel], query: &str) {
             runtime: "-".to_string(),
             mode: "-".to_string(),
             mem_use: "-".to_string(),
-            context: format!("{}k", m.context_length / 1000),
+            context: format_context_length(m.context_length),
             release_date: m
                 .release_date
                 .clone()

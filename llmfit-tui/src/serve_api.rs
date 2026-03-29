@@ -347,15 +347,25 @@ fn filtered_fits(
 
     if let Some(search) = query.search.as_ref() {
         let search_lower = search.to_lowercase();
+        let terms: Vec<&str> = search_lower.split_whitespace().collect();
         fits.retain(|f| {
-            f.model.name.to_lowercase().contains(&search_lower)
-                || f.model.provider.to_lowercase().contains(&search_lower)
-                || f.model
-                    .parameter_count
-                    .to_lowercase()
-                    .contains(&search_lower)
-                || f.model.use_case.to_lowercase().contains(&search_lower)
-                || f.use_case.label().to_lowercase().contains(&search_lower)
+            let searchable = format!(
+                "{} {} {} {} {} {} {}",
+                f.model.name.to_lowercase(),
+                f.model.provider.to_lowercase(),
+                f.model.parameter_count.to_lowercase(),
+                f.model.use_case.to_lowercase(),
+                f.use_case.label().to_lowercase(),
+                f.model.context_length,
+                llmfit_core::models::format_context_length(f.model.context_length).to_lowercase(),
+            );
+            terms.iter().all(|term| {
+                searchable.contains(term)
+                    || llmfit_core::models::context_matches_search_term(
+                        term,
+                        f.model.context_length,
+                    )
+            })
         });
     }
 
