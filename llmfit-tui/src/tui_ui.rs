@@ -1,5 +1,4 @@
 use ratatui::{
-    Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
@@ -7,12 +6,13 @@ use ratatui::{
         Block, Borders, Cell, Clear, Paragraph, Row, Scrollbar, ScrollbarOrientation,
         ScrollbarState, Table, TableState, Wrap,
     },
+    Frame,
 };
 
 use crate::theme::ThemeColors;
 use crate::tui_app::{
-    App, AvailabilityFilter, DL_DOCKER, DL_LLAMACPP, DL_LMSTUDIO, DL_OLLAMA, DownloadCapability,
-    DownloadProvider, FitFilter, InputMode, PlanField,
+    App, AvailabilityFilter, DownloadCapability, DownloadProvider, FitFilter, InputMode, PlanField,
+    RuntimeFilter, DL_DOCKER, DL_LLAMACPP, DL_LMSTUDIO, DL_OLLAMA,
 };
 use llmfit_core::fit::{FitLevel, ModelFit, SortColumn};
 use llmfit_core::hardware::is_running_in_wsl;
@@ -178,6 +178,21 @@ fn draw_system_bar(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
         tc.muted
     };
 
+    let vllm_info = if app.vllm_available {
+        if app.vllm_installed_count > 0 {
+            format!("vLLM: ✓ ({} served)", app.vllm_installed_count)
+        } else {
+            "vLLM: ✓ (runtime)".to_string()
+        }
+    } else {
+        "vLLM: ✗".to_string()
+    };
+    let vllm_color = if app.vllm_available {
+        tc.good
+    } else {
+        tc.muted
+    };
+
     let hardware_line = Line::from(vec![
         Span::styled(" CPU: ", Style::default().fg(tc.muted)),
         Span::styled(
@@ -213,6 +228,8 @@ fn draw_system_bar(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
         Span::styled(docker_mr_info, Style::default().fg(docker_mr_color)),
         Span::styled("  │  ", Style::default().fg(tc.muted)),
         Span::styled(lmstudio_info, Style::default().fg(lmstudio_color)),
+        Span::styled("  │  ", Style::default().fg(tc.muted)),
+        Span::styled(vllm_info, Style::default().fg(vllm_color)),
     ];
 
     if app.backend_hidden_count > 0 {
@@ -249,12 +266,13 @@ fn draw_search_and_filters(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeC
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Min(24),    // search
+            Constraint::Min(20),    // search
             Constraint::Length(16), // provider summary
             Constraint::Length(14), // use-case summary
             Constraint::Length(12), // capability summary
             Constraint::Length(14), // sort column
             Constraint::Length(14), // fit filter
+            Constraint::Length(14),
             Constraint::Length(14), // availability filter
             Constraint::Length(10), // TP filter
             Constraint::Length(12), // context filter
@@ -424,6 +442,27 @@ fn draw_search_and_filters(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeC
         .block(fit_block);
     frame.render_widget(fit_text, chunks[5]);
 
+    let runtime_style = match app.runtime_filter {
+        RuntimeFilter::Any => Style::default().fg(tc.fg),
+        RuntimeFilter::LlamaCpp => Style::default().fg(tc.info),
+        RuntimeFilter::Mlx => Style::default().fg(tc.accent_secondary),
+        RuntimeFilter::Vllm => Style::default().fg(tc.warning),
+        RuntimeFilter::LmStudio => Style::default().fg(tc.good),
+    };
+
+    let runtime_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(tc.border))
+        .title(" Runtime [w] ")
+        .title_style(Style::default().fg(tc.muted));
+
+    let runtime_text = Paragraph::new(Line::from(Span::styled(
+        app.runtime_filter.label(),
+        runtime_style,
+    )))
+    .block(runtime_block);
+    frame.render_widget(runtime_text, chunks[6]);
+
     // Availability filter
     let avail_style = match app.availability_filter {
         AvailabilityFilter::All => Style::default().fg(tc.fg),
@@ -442,7 +481,7 @@ fn draw_search_and_filters(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeC
         avail_style,
     )))
     .block(avail_block);
-    frame.render_widget(avail_text, chunks[6]);
+    frame.render_widget(avail_text, chunks[7]);
 
     // TP filter
     use crate::tui_app::TpFilter;
@@ -457,7 +496,7 @@ fn draw_search_and_filters(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeC
         .title_style(Style::default().fg(tc.muted));
     let tp_text =
         Paragraph::new(Line::from(Span::styled(app.tp_filter.label(), tp_style))).block(tp_block);
-    frame.render_widget(tp_text, chunks[7]);
+    frame.render_widget(tp_text, chunks[8]);
 
     // Context filter
     use crate::tui_app::ContextFilter;
@@ -475,7 +514,7 @@ fn draw_search_and_filters(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeC
         context_style,
     )))
     .block(context_block);
-    frame.render_widget(context_text, chunks[8]);
+    frame.render_widget(context_text, chunks[9]);
 
     // Theme indicator
     let theme_block = Block::default()
@@ -489,7 +528,7 @@ fn draw_search_and_filters(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeC
         Style::default().fg(tc.info),
     )))
     .block(theme_block);
-    frame.render_widget(theme_text, chunks[9]);
+    frame.render_widget(theme_text, chunks[10]);
 }
 
 fn fit_color(level: FitLevel, tc: &ThemeColors) -> Color {
@@ -1512,11 +1551,15 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
                 {
                     installed_providers.push("LM Studio");
                 }
+                if providers::is_model_installed_vllm(&fit.model.name, &app.vllm_installed) {
+                    installed_providers.push("vLLM");
+                }
                 let any_available = app.ollama_available
                     || app.mlx_available
                     || app.llamacpp_available
                     || app.docker_mr_available
-                    || app.lmstudio_available;
+                    || app.lmstudio_available
+                    || app.vllm_available;
 
                 if !installed_providers.is_empty() {
                     let label = installed_providers
@@ -1525,6 +1568,13 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
                         .collect::<Vec<_>>()
                         .join("  ");
                     Span::styled(label, Style::default().fg(tc.good).bold())
+                } else if app.vllm_available
+                    && fit.runtime == llmfit_core::fit::InferenceRuntime::Vllm
+                {
+                    Span::styled(
+                        "✗ No  (vLLM runtime available; download weights separately)",
+                        Style::default().fg(tc.muted),
+                    )
                 } else if any_available {
                     Span::styled("✗ No  (press d to pull)", Style::default().fg(tc.muted))
                 } else {
@@ -2411,7 +2461,7 @@ fn status_keys_and_mode(app: &App) -> (String, String) {
             };
             (
                 format!(
-                    " ↑↓/jk:nav  {}  /:search  f:fit  K:ctx  s:sort  v:visual  V:select  t:theme  p:plan  m:mark  c:compare  x:clear mark  y:copy{}  P:providers  U:use cases  C:caps  q:quit  tok/s*:est",
+                    " ↑↓/jk:nav  {}  /:search  f:fit  w:runtime  K:ctx  s:sort  Ctrl-R:reset  v:visual  V:select  t:theme  p:plan  m:mark  c:compare  x:clear mark  y:copy{}  P:providers  U:use cases  C:caps  q:quit  tok/s*:est",
                     detail_key, ollama_keys,
                 ),
                 "NORMAL".to_string(),

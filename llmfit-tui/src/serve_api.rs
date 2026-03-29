@@ -382,6 +382,9 @@ fn filtered_fits(
         RuntimeFilter::LlamaCpp => {
             fits.retain(|f| f.runtime == InferenceRuntime::LlamaCpp);
         }
+        RuntimeFilter::LmStudio => {
+            fits.retain(|f| f.runtime == InferenceRuntime::LlamaCpp);
+        }
     }
 
     if let Some(use_case) = use_case_filter {
@@ -402,6 +405,7 @@ enum RuntimeFilter {
     Mlx,
     LlamaCpp,
     Vllm,
+    LmStudio,
 }
 
 fn parse_sort(raw: Option<&str>) -> Result<SortColumn, ApiError> {
@@ -449,9 +453,10 @@ fn parse_runtime(raw: Option<&str>) -> Result<RuntimeFilter, ApiError> {
         "mlx" => RuntimeFilter::Mlx,
         "llamacpp" | "llama.cpp" | "llama_cpp" => RuntimeFilter::LlamaCpp,
         "vllm" => RuntimeFilter::Vllm,
+        "lmstudio" | "lm_studio" | "lm-studio" => RuntimeFilter::LmStudio,
         _ => {
             return Err(ApiError::bad_request(
-                "invalid runtime value: use any|mlx|llamacpp|vllm",
+                "invalid runtime value: use any|mlx|llamacpp|vllm|lmstudio",
             ));
         }
     };

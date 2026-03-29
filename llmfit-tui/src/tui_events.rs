@@ -76,6 +76,8 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) {
         // Fit filter
         KeyCode::Char('f') => app.cycle_fit_filter(),
 
+        KeyCode::Char('w') => app.cycle_runtime_filter(),
+
         // Availability filter
         KeyCode::Char('a') => app.cycle_availability_filter(),
 
@@ -129,6 +131,10 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) {
                 || app.lmstudio_available =>
         {
             app.refresh_installed()
+        }
+
+        KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.reset_filters()
         }
 
         // Refresh online model metadata and discover new trending models

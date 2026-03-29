@@ -1,14 +1,17 @@
-use llmfit_core::fit::{FitLevel, ModelFit, SortColumn, backend_compatible};
+use llmfit_core::fit::{FitLevel, InferenceRuntime, ModelFit, SortColumn, backend_compatible};
 use llmfit_core::hardware::SystemSpecs;
 use llmfit_core::models::{Capability, LlmModel, ModelDatabase, UseCase};
 use llmfit_core::plan::{PlanEstimate, PlanRequest, estimate_model_plan};
 use llmfit_core::providers::{
     self, DockerModelRunnerProvider, LlamaCppProvider, LmStudioProvider, MlxProvider,
-    ModelProvider, OllamaProvider, PullEvent, PullHandle,
+    ModelProvider, OllamaProvider, PullEvent, PullHandle, VllmProvider,
 };
 use llmfit_core::update::{self, UpdateOptions};
+use serde::{Deserialize, Serialize};
 
 use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
 use crate::theme::Theme;
@@ -86,6 +89,17 @@ impl FitFilter {
             FitFilter::TooTight => FitFilter::All,
         }
     }
+
+    fn from_label(label: &str) -> Self {
+        match label {
+            "Perfect" => FitFilter::Perfect,
+            "Good" => FitFilter::Good,
+            "Marginal" => FitFilter::Marginal,
+            "Too Tight" => FitFilter::TooTight,
+            "Runnable" => FitFilter::Runnable,
+            _ => FitFilter::All,
+        }
+    }
 }
 
 /// Filter by model availability / download readiness.
@@ -110,6 +124,14 @@ impl AvailabilityFilter {
             AvailabilityFilter::All => AvailabilityFilter::HasGguf,
             AvailabilityFilter::HasGguf => AvailabilityFilter::Installed,
             AvailabilityFilter::Installed => AvailabilityFilter::All,
+        }
+    }
+
+    fn from_label(label: &str) -> Self {
+        match label {
+            "GGUF Avail" => AvailabilityFilter::HasGguf,
+            "Installed" => AvailabilityFilter::Installed,
+            _ => AvailabilityFilter::All,
         }
     }
 }
@@ -147,6 +169,15 @@ impl TpFilter {
             TpFilter::Tp2 => model.supports_tp(2),
             TpFilter::Tp3 => model.supports_tp(3),
             TpFilter::Tp4 => model.supports_tp(4),
+        }
+    }
+
+    fn from_label(label: &str) -> Self {
+        match label {
+            "TP=2" => TpFilter::Tp2,
+            "TP=3" => TpFilter::Tp3,
+            "TP=4" => TpFilter::Tp4,
+            _ => TpFilter::All,
         }
     }
 }
@@ -199,6 +230,174 @@ impl ContextFilter {
             ContextFilter::AtLeast262k => Some(262_144),
             ContextFilter::AtLeast512k => Some(524_288),
             ContextFilter::AtLeast1m => Some(1_048_576),
+        }
+    }
+
+    fn from_label(label: &str) -> Self {
+        match label {
+            ">=32k" => ContextFilter::AtLeast32k,
+            ">=40k" => ContextFilter::AtLeast40k,
+            ">=128k" => ContextFilter::AtLeast128k,
+            ">=131k" => ContextFilter::AtLeast131k,
+            ">=262k" => ContextFilter::AtLeast262k,
+            ">=512k" => ContextFilter::AtLeast512k,
+            ">=1M" => ContextFilter::AtLeast1m,
+            _ => ContextFilter::All,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeFilter {
+    Any,
+    LlamaCpp,
+    Mlx,
+    Vllm,
+    LmStudio,
+}
+
+impl RuntimeFilter {
+    pub fn label(&self) -> &str {
+        match self {
+            RuntimeFilter::Any => "Any",
+            RuntimeFilter::LlamaCpp => "llama.cpp",
+            RuntimeFilter::Mlx => "MLX",
+            RuntimeFilter::Vllm => "vLLM",
+            RuntimeFilter::LmStudio => "LM Studio",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            RuntimeFilter::Any => RuntimeFilter::LlamaCpp,
+            RuntimeFilter::LlamaCpp => RuntimeFilter::Mlx,
+            RuntimeFilter::Mlx => RuntimeFilter::Vllm,
+            RuntimeFilter::Vllm => RuntimeFilter::LmStudio,
+            RuntimeFilter::LmStudio => RuntimeFilter::Any,
+        }
+    }
+
+    fn from_label(label: &str) -> Self {
+        match label {
+            "llama.cpp" => RuntimeFilter::LlamaCpp,
+            "MLX" => RuntimeFilter::Mlx,
+            "vLLM" => RuntimeFilter::Vllm,
+            "LM Studio" => RuntimeFilter::LmStudio,
+            _ => RuntimeFilter::Any,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+struct FilterState {
+    fit_filter: String,
+    runtime_filter: String,
+    availability_filter: String,
+    tp_filter: String,
+    context_filter: String,
+    installed_first: bool,
+    sort_column: String,
+    sort_ascending: bool,
+    selected_providers: Option<Vec<String>>,
+    selected_use_cases: Option<Vec<String>>,
+    selected_capabilities: Option<Vec<String>>,
+    selected_quants: Option<Vec<String>>,
+    selected_run_modes: Option<Vec<String>>,
+    selected_params_buckets: Option<Vec<String>>,
+}
+
+impl Default for FilterState {
+    fn default() -> Self {
+        Self {
+            fit_filter: FitFilter::All.label().to_string(),
+            runtime_filter: RuntimeFilter::Any.label().to_string(),
+            availability_filter: AvailabilityFilter::All.label().to_string(),
+            tp_filter: TpFilter::All.label().to_string(),
+            context_filter: ContextFilter::All.label().to_string(),
+            installed_first: false,
+            sort_column: SortColumn::Score.label().to_string(),
+            sort_ascending: false,
+            selected_providers: None,
+            selected_use_cases: None,
+            selected_capabilities: None,
+            selected_quants: None,
+            selected_run_modes: None,
+            selected_params_buckets: None,
+        }
+    }
+}
+
+impl FilterState {
+    fn config_path() -> Option<PathBuf> {
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .ok()?;
+        Some(
+            PathBuf::from(home)
+                .join(".config")
+                .join("llmfit")
+                .join("filters.json"),
+        )
+    }
+
+    fn load() -> Option<Self> {
+        Self::config_path().and_then(|path| Self::load_from_path(&path))
+    }
+
+    fn load_from_path(path: &Path) -> Option<Self> {
+        let content = fs::read_to_string(path).ok()?;
+        serde_json::from_str(&content).ok()
+    }
+
+    fn save(&self) {
+        if let Some(path) = Self::config_path() {
+            self.save_to_path(&path);
+        }
+    }
+
+    fn save_to_path(&self, path: &Path) {
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        if let Ok(json) = serde_json::to_string_pretty(self) {
+            let _ = fs::write(path, json);
+        }
+    }
+
+    fn from_app(app: &App) -> Self {
+        Self {
+            fit_filter: app.fit_filter.label().to_string(),
+            runtime_filter: app.runtime_filter.label().to_string(),
+            availability_filter: app.availability_filter.label().to_string(),
+            tp_filter: app.tp_filter.label().to_string(),
+            context_filter: app.context_filter.label().to_string(),
+            installed_first: app.installed_first,
+            sort_column: app.sort_column.label().to_string(),
+            sort_ascending: app.sort_ascending,
+            selected_providers: Some(App::selected_string_items(
+                &app.providers,
+                &app.selected_providers,
+            )),
+            selected_use_cases: Some(App::selected_labeled_items(
+                &app.use_cases,
+                &app.selected_use_cases,
+                |use_case| use_case.label(),
+            )),
+            selected_capabilities: Some(App::selected_labeled_items(
+                &app.capabilities,
+                &app.selected_capabilities,
+                |capability| capability.label(),
+            )),
+            selected_quants: Some(App::selected_string_items(&app.quants, &app.selected_quants)),
+            selected_run_modes: Some(App::selected_string_items(
+                &app.run_modes,
+                &app.selected_run_modes,
+            )),
+            selected_params_buckets: Some(App::selected_string_items(
+                &app.params_buckets,
+                &app.selected_params_buckets,
+            )),
         }
     }
 }
@@ -271,6 +470,7 @@ pub struct App {
 
     // Filters
     pub fit_filter: FitFilter,
+    pub runtime_filter: RuntimeFilter,
     pub availability_filter: AvailabilityFilter,
     pub tp_filter: TpFilter,
     pub context_filter: ContextFilter,
@@ -328,6 +528,10 @@ pub struct App {
     pub lmstudio_installed: HashSet<String>,
     pub lmstudio_installed_count: usize,
     lmstudio: LmStudioProvider,
+    pub vllm_available: bool,
+    pub vllm_installed: HashSet<String>,
+    pub vllm_installed_count: usize,
+    vllm: VllmProvider,
 
     // Download state
     pub pull_active: Option<PullHandle>,
@@ -378,6 +582,122 @@ pub struct App {
 }
 
 impl App {
+    fn selected_string_items(items: &[String], selected: &[bool]) -> Vec<String> {
+        items
+            .iter()
+            .zip(selected.iter())
+            .filter(|(_, is_selected)| **is_selected)
+            .map(|(item, _)| item.clone())
+            .collect()
+    }
+
+    fn selected_labeled_items<T>(
+        items: &[T],
+        selected: &[bool],
+        label: impl Fn(&T) -> &'static str,
+    ) -> Vec<String> {
+        items
+            .iter()
+            .zip(selected.iter())
+            .filter(|(_, is_selected)| **is_selected)
+            .map(|(item, _)| label(item).to_string())
+            .collect()
+    }
+
+    fn apply_saved_string_selection(items: &[String], saved: Option<&[String]>) -> Option<Vec<bool>> {
+        saved.map(|selected_items| {
+            items
+                .iter()
+                .map(|item| selected_items.iter().any(|selected| selected == item))
+                .collect()
+        })
+    }
+
+    fn apply_saved_labeled_selection<T>(
+        items: &[T],
+        saved: Option<&[String]>,
+        label: impl Fn(&T) -> &'static str,
+    ) -> Option<Vec<bool>> {
+        saved.map(|selected_items| {
+            items
+                .iter()
+                .map(|item| selected_items.iter().any(|selected| selected == label(item)))
+                .collect()
+        })
+    }
+
+    fn parse_sort_column(label: &str) -> SortColumn {
+        match label {
+            "tok/s" => SortColumn::Tps,
+            "Params" => SortColumn::Params,
+            "Mem%" => SortColumn::MemPct,
+            "Ctx" => SortColumn::Ctx,
+            "Date" => SortColumn::ReleaseDate,
+            "Use" => SortColumn::UseCase,
+            _ => SortColumn::Score,
+        }
+    }
+
+    fn save_filter_state(&self) {
+        FilterState::from_app(self).save();
+    }
+
+    fn reset_named_selection(selection: &mut [bool]) {
+        for selected in selection {
+            *selected = true;
+        }
+    }
+
+    fn apply_filter_state(&mut self, state: &FilterState) {
+        self.fit_filter = FitFilter::from_label(&state.fit_filter);
+        self.runtime_filter = RuntimeFilter::from_label(&state.runtime_filter);
+        self.availability_filter = AvailabilityFilter::from_label(&state.availability_filter);
+        self.tp_filter = TpFilter::from_label(&state.tp_filter);
+        self.context_filter = ContextFilter::from_label(&state.context_filter);
+        self.installed_first = state.installed_first;
+        self.sort_column = Self::parse_sort_column(&state.sort_column);
+        self.sort_ascending = state.sort_ascending;
+
+        if let Some(selected) = Self::apply_saved_string_selection(
+            &self.providers,
+            state.selected_providers.as_deref(),
+        ) {
+            self.selected_providers = selected;
+        }
+        if let Some(selected) = Self::apply_saved_labeled_selection(
+            &self.use_cases,
+            state.selected_use_cases.as_deref(),
+            |use_case| use_case.label(),
+        ) {
+            self.selected_use_cases = selected;
+        }
+        if let Some(selected) = Self::apply_saved_labeled_selection(
+            &self.capabilities,
+            state.selected_capabilities.as_deref(),
+            |capability| capability.label(),
+        ) {
+            self.selected_capabilities = selected;
+        }
+        if let Some(selected) = Self::apply_saved_string_selection(
+            &self.quants,
+            state.selected_quants.as_deref(),
+        ) {
+            self.selected_quants = selected;
+        }
+        if let Some(selected) = Self::apply_saved_string_selection(
+            &self.run_modes,
+            state.selected_run_modes.as_deref(),
+        ) {
+            self.selected_run_modes = selected;
+        }
+        if let Some(selected) = Self::apply_saved_string_selection(
+            &self.params_buckets,
+            state.selected_params_buckets.as_deref(),
+        ) {
+            self.selected_params_buckets = selected;
+        }
+    }
+
     fn preserve_string_selection(
         previous_items: &[String],
         previous_selected: &[bool],
@@ -421,6 +741,7 @@ impl App {
         llamacpp_installed: &HashSet<String>,
         docker_mr_installed: &HashSet<String>,
         lmstudio_installed: &HashSet<String>,
+        vllm_installed: &HashSet<String>,
     ) -> Vec<ModelFit> {
         models
             .iter()
@@ -430,7 +751,8 @@ impl App {
                     || providers::is_model_installed_mlx(&m.name, mlx_installed)
                     || providers::is_model_installed_llamacpp(&m.name, llamacpp_installed)
                     || providers::is_model_installed_docker_mr(&m.name, docker_mr_installed)
-                    || providers::is_model_installed_lmstudio(&m.name, lmstudio_installed);
+                    || providers::is_model_installed_lmstudio(&m.name, lmstudio_installed)
+                    || providers::is_model_installed_vllm(&m.name, vllm_installed);
                 fit
             })
             .collect()
@@ -492,6 +814,32 @@ impl App {
         self.quants = model_quants;
     }
 
+    fn runtime_filter_matches_fit(&self, fit: &ModelFit) -> bool {
+        match self.runtime_filter {
+            RuntimeFilter::Any => true,
+            RuntimeFilter::LlamaCpp => {
+                fit.runtime == InferenceRuntime::LlamaCpp
+                    && (fit.model.format == llmfit_core::models::ModelFormat::Gguf
+                        || !fit.model.gguf_sources.is_empty()
+                        || providers::is_model_installed_llamacpp(
+                            &fit.model.name,
+                            &self.llamacpp_installed,
+                        ))
+            }
+            RuntimeFilter::Mlx => fit.runtime == InferenceRuntime::Mlx,
+            RuntimeFilter::Vllm => {
+                fit.runtime == InferenceRuntime::Vllm
+                    || providers::is_model_installed_vllm(&fit.model.name, &self.vllm_installed)
+            }
+            RuntimeFilter::LmStudio => {
+                providers::is_model_installed_lmstudio(
+                    &fit.model.name,
+                    &self.lmstudio_installed,
+                )
+            }
+        }
+    }
+
     pub fn with_specs_and_context(specs: SystemSpecs, context_limit: Option<u32>) -> Self {
         let db = ModelDatabase::new();
 
@@ -521,6 +869,9 @@ impl App {
         let (lmstudio_available, lmstudio_installed, lmstudio_installed_count) =
             lmstudio.detect_with_installed();
 
+        let vllm = VllmProvider::new();
+        let (vllm_available, vllm_installed, vllm_installed_count) = vllm.detect_with_installed();
+
         // Track how many we're skipping so the UI can surface it.
         let backend_hidden_count = db
             .get_all_models()
@@ -545,6 +896,7 @@ impl App {
             &llamacpp_installed,
             &docker_mr_installed,
             &lmstudio_installed,
+            &vllm_installed,
         );
 
         // Sort by fit level then RAM usage
@@ -612,6 +964,8 @@ impl App {
         let (download_capability_tx, download_capability_rx) = mpsc::channel();
         let (catalog_refresh_tx, catalog_refresh_rx) = mpsc::channel();
 
+        let saved_filter_state = FilterState::load();
+
         let mut app = App {
             should_quit: false,
             input_mode: InputMode::Normal,
@@ -629,6 +983,7 @@ impl App {
             capabilities: model_capabilities,
             selected_capabilities,
             fit_filter: FitFilter::All,
+            runtime_filter: RuntimeFilter::Any,
             availability_filter: AvailabilityFilter::All,
             tp_filter: TpFilter::All,
             context_filter: ContextFilter::All,
@@ -678,6 +1033,10 @@ impl App {
             lmstudio_installed,
             lmstudio_installed_count,
             lmstudio,
+            vllm_available,
+            vllm_installed,
+            vllm_installed_count,
+            vllm,
             pull_active: None,
             pull_status: None,
             pull_percent: None,
@@ -707,7 +1066,14 @@ impl App {
             backend_hidden_count,
         };
 
-        app.apply_filters();
+        if let Some(filter_state) = saved_filter_state {
+            app.apply_filter_state(&filter_state);
+            app.rebuild_fits();
+            app.apply_filter_state(&filter_state);
+            app.apply_filters();
+        } else {
+            app.apply_filters();
+        }
         app.enqueue_capability_probes_for_visible(24);
         app
     }
@@ -787,6 +1153,8 @@ impl App {
                     FitFilter::TooTight => fit.fit_level == FitLevel::TooTight,
                     FitFilter::Runnable => fit.fit_level != FitLevel::TooTight,
                 };
+
+                let matches_runtime = self.runtime_filter_matches_fit(fit);
 
                 // Availability filter
                 let matches_availability = match self.availability_filter {
@@ -874,6 +1242,7 @@ impl App {
                     && matches_provider
                     && matches_use_case
                     && matches_fit
+                    && matches_runtime
                     && matches_availability
                     && matches_capability
                     && matches_quant
@@ -957,32 +1326,65 @@ impl App {
     pub fn cycle_fit_filter(&mut self) {
         self.fit_filter = self.fit_filter.next();
         self.apply_filters();
+        self.save_filter_state();
+    }
+
+    pub fn cycle_runtime_filter(&mut self) {
+        self.runtime_filter = self.runtime_filter.next();
+        self.apply_filters();
+        self.save_filter_state();
     }
 
     pub fn cycle_availability_filter(&mut self) {
         self.availability_filter = self.availability_filter.next();
         self.apply_filters();
+        self.save_filter_state();
     }
 
     pub fn cycle_tp_filter(&mut self) {
         self.tp_filter = self.tp_filter.next();
         self.apply_filters();
+        self.save_filter_state();
     }
 
     pub fn cycle_context_filter(&mut self) {
         self.context_filter = self.context_filter.next();
         self.rebuild_fits();
+        self.save_filter_state();
     }
 
     pub fn cycle_sort_column(&mut self) {
         self.sort_column = self.sort_column.next();
         self.sort_ascending = false;
         self.re_sort();
+        self.save_filter_state();
     }
 
     pub fn cycle_theme(&mut self) {
         self.theme = self.theme.next();
         self.theme.save();
+    }
+
+    pub fn reset_filters(&mut self) {
+        self.fit_filter = FitFilter::All;
+        self.runtime_filter = RuntimeFilter::Any;
+        self.availability_filter = AvailabilityFilter::All;
+        self.tp_filter = TpFilter::All;
+        self.context_filter = ContextFilter::All;
+        self.installed_first = false;
+        self.sort_column = SortColumn::Score;
+        self.sort_ascending = false;
+        Self::reset_named_selection(&mut self.selected_providers);
+        Self::reset_named_selection(&mut self.selected_use_cases);
+        Self::reset_named_selection(&mut self.selected_capabilities);
+        Self::reset_named_selection(&mut self.selected_quants);
+        Self::reset_named_selection(&mut self.selected_run_modes);
+        Self::reset_named_selection(&mut self.selected_params_buckets);
+        self.search_query.clear();
+        self.cursor_position = 0;
+        self.rebuild_fits();
+        self.save_filter_state();
+        self.pull_status = Some("Reset all filters".to_string());
     }
 
     pub fn enter_search(&mut self) {
@@ -1293,6 +1695,7 @@ impl App {
             self.selected_providers[self.provider_cursor] =
                 !self.selected_providers[self.provider_cursor];
             self.apply_filters();
+            self.save_filter_state();
         }
     }
 
@@ -1303,6 +1706,7 @@ impl App {
             *s = new_val;
         }
         self.apply_filters();
+        self.save_filter_state();
     }
 
     pub fn provider_popup_clear_all(&mut self) {
@@ -1310,6 +1714,7 @@ impl App {
             *s = false;
         }
         self.apply_filters();
+        self.save_filter_state();
     }
 
     pub fn use_case_popup_up(&mut self) {
@@ -1329,6 +1734,7 @@ impl App {
             self.selected_use_cases[self.use_case_cursor] =
                 !self.selected_use_cases[self.use_case_cursor];
             self.apply_filters();
+            self.save_filter_state();
         }
     }
 
@@ -1339,6 +1745,7 @@ impl App {
             *s = new_val;
         }
         self.apply_filters();
+        self.save_filter_state();
     }
 
     pub fn open_capability_popup(&mut self) {
@@ -1366,6 +1773,7 @@ impl App {
             self.selected_capabilities[self.capability_cursor] =
                 !self.selected_capabilities[self.capability_cursor];
             self.apply_filters();
+            self.save_filter_state();
         }
     }
 
@@ -1376,6 +1784,7 @@ impl App {
             *s = new_val;
         }
         self.apply_filters();
+        self.save_filter_state();
     }
 
     // ── Visual mode ──────────────────────────────────────────────
@@ -1508,6 +1917,7 @@ impl App {
             self.sort_ascending = false;
         }
         self.re_sort();
+        self.save_filter_state();
     }
 
     // ── Quant popup ─────────────────────────────────────────────
@@ -1532,6 +1942,7 @@ impl App {
         if self.quant_cursor < self.selected_quants.len() {
             self.selected_quants[self.quant_cursor] = !self.selected_quants[self.quant_cursor];
             self.apply_filters();
+            self.save_filter_state();
         }
     }
 
@@ -1542,6 +1953,7 @@ impl App {
             *s = new_val;
         }
         self.apply_filters();
+        self.save_filter_state();
     }
 
     // ── RunMode popup ───────────────────────────────────────────
@@ -1567,6 +1979,7 @@ impl App {
             self.selected_run_modes[self.run_mode_cursor] =
                 !self.selected_run_modes[self.run_mode_cursor];
             self.apply_filters();
+            self.save_filter_state();
         }
     }
 
@@ -1577,6 +1990,7 @@ impl App {
             *s = new_val;
         }
         self.apply_filters();
+        self.save_filter_state();
     }
 
     // ── Params bucket popup ─────────────────────────────────────
@@ -1602,6 +2016,7 @@ impl App {
             self.selected_params_buckets[self.params_bucket_cursor] =
                 !self.selected_params_buckets[self.params_bucket_cursor];
             self.apply_filters();
+            self.save_filter_state();
         }
     }
 
@@ -1612,11 +2027,13 @@ impl App {
             *s = new_val;
         }
         self.apply_filters();
+        self.save_filter_state();
     }
 
     pub fn toggle_installed_first(&mut self) {
         self.installed_first = !self.installed_first;
         self.re_sort();
+        self.save_filter_state();
     }
 
     /// Re-sort all_fits using current sort column and installed_first preference, then refilter.
@@ -1654,6 +2071,7 @@ impl App {
             &self.llamacpp_installed,
             &self.docker_mr_installed,
             &self.lmstudio_installed,
+            &self.vllm_installed,
         );
         let mut sorted = llmfit_core::fit::rank_models_by_fit_opts_col(
             fits,
@@ -1797,10 +2215,11 @@ impl App {
             || self.mlx_available
             || self.llamacpp_available
             || self.docker_mr_available
-            || self.lmstudio_available;
+            || self.lmstudio_available
+            || self.vllm_available;
         if !any_available {
             self.pull_status = Some(
-                "No runtime available — install Ollama, llama.cpp, Docker, or LM Studio"
+                "No runtime available — install Ollama, llama.cpp, vLLM, Docker, or LM Studio"
                     .to_string(),
             );
             return;
@@ -1829,11 +2248,13 @@ impl App {
                 || self.llamacpp_available
                 || self.mlx_available
                 || self.docker_mr_available
-                || self.lmstudio_available;
+                || self.lmstudio_available
+                || self.vllm_available;
             self.pull_status = Some(if any_runtime {
-                Self::format_no_download_message(model_format, is_mlx_model)
+                Self::format_no_download_message(model_format, is_mlx_model, self.vllm_available)
             } else {
-                "No runtime available — install Ollama, llama.cpp, Docker, or LM Studio".to_string()
+                "No runtime available — install Ollama, llama.cpp, vLLM, Docker, or LM Studio"
+                    .to_string()
             });
         }
     }
@@ -1843,20 +2264,27 @@ impl App {
     fn format_no_download_message(
         format: llmfit_core::models::ModelFormat,
         is_mlx_model: bool,
+        vllm_available: bool,
     ) -> String {
         use llmfit_core::models::ModelFormat;
         if is_mlx_model {
             "MLX model — requires Apple Silicon with MLX installed".to_string()
         } else {
             match format {
-                ModelFormat::Awq => {
-                    "AWQ model — requires vLLM or a CUDA/ROCm GPU; no GGUF conversion available"
+                ModelFormat::Awq => if vllm_available {
+                    "AWQ model — vLLM is installed, but llmfit cannot download AWQ weights automatically yet"
                         .to_string()
-                }
-                ModelFormat::Gptq => {
-                    "GPTQ model — requires vLLM or a CUDA/ROCm GPU; no GGUF conversion available"
+                } else {
+                    "AWQ model — requires vLLM on a CUDA/ROCm GPU; no GGUF conversion available"
                         .to_string()
-                }
+                },
+                ModelFormat::Gptq => if vllm_available {
+                    "GPTQ model — vLLM is installed, but llmfit cannot download GPTQ weights automatically yet"
+                        .to_string()
+                } else {
+                    "GPTQ model — requires vLLM on a CUDA/ROCm GPU; no GGUF conversion available"
+                        .to_string()
+                },
                 _ => "No downloadable format found for this model".to_string(),
             }
         }
@@ -2127,6 +2555,10 @@ impl App {
         let (lmstudio_set, lmstudio_count) = self.lmstudio.installed_models_counted();
         self.lmstudio_installed = lmstudio_set;
         self.lmstudio_installed_count = lmstudio_count;
+        let (vllm_available, vllm_set, vllm_count) = self.vllm.detect_with_installed();
+        self.vllm_available = vllm_available;
+        self.vllm_installed = vllm_set;
+        self.vllm_installed_count = vllm_count;
         self.rebuild_fits();
         self.enqueue_capability_probes_for_visible(24);
     }
@@ -2233,4 +2665,835 @@ fn command_exists(name: &str) -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{App, AvailabilityFilter, ContextFilter, FilterState, FitFilter, RuntimeFilter, TpFilter};
+    use llmfit_core::{
+        fit::{FitLevel, InferenceRuntime, ModelFit, RunMode, ScoreComponents},
+        hardware::{GpuBackend, SystemSpecs},
+        models::{Capability, LlmModel, ModelFormat, UseCase},
+    };
+    use std::collections::{HashMap, HashSet};
+    use std::fs;
+    use std::sync::mpsc;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_path(name: &str) -> std::path::PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("llmfit-{name}-{nanos}.json"))
+    }
+
+    #[test]
+    fn runtime_filter_cycles_through_all_values() {
+        assert_eq!(RuntimeFilter::Any.next(), RuntimeFilter::LlamaCpp);
+        assert_eq!(RuntimeFilter::LlamaCpp.next(), RuntimeFilter::Mlx);
+        assert_eq!(RuntimeFilter::Mlx.next(), RuntimeFilter::Vllm);
+        assert_eq!(RuntimeFilter::Vllm.next(), RuntimeFilter::LmStudio);
+        assert_eq!(RuntimeFilter::LmStudio.next(), RuntimeFilter::Any);
+    }
+
+    #[test]
+    fn filter_label_parsers_fallback_to_defaults() {
+        assert_eq!(FitFilter::from_label("unknown"), FitFilter::All);
+        assert_eq!(RuntimeFilter::from_label("unknown"), RuntimeFilter::Any);
+        assert_eq!(AvailabilityFilter::from_label("unknown"), AvailabilityFilter::All);
+        assert_eq!(TpFilter::from_label("unknown"), TpFilter::All);
+        assert_eq!(ContextFilter::from_label("unknown"), ContextFilter::All);
+        assert_eq!(App::parse_sort_column("unknown"), llmfit_core::fit::SortColumn::Score);
+    }
+
+    #[test]
+    fn filter_state_loads_empty_json_with_defaults() {
+        let path = temp_path("empty-filter-state");
+        fs::write(&path, "{}").expect("should write test config file");
+
+        let loaded = FilterState::load_from_path(&path).expect("should load empty config");
+
+        assert_eq!(loaded.fit_filter, "All");
+        assert_eq!(loaded.runtime_filter, "Any");
+        assert_eq!(loaded.availability_filter, "All");
+        assert_eq!(loaded.tp_filter, "All");
+        assert_eq!(loaded.context_filter, "All");
+        assert!(!loaded.installed_first);
+        assert_eq!(loaded.sort_column, "Score");
+        assert!(!loaded.sort_ascending);
+        assert_eq!(loaded.selected_providers, None);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn filter_state_roundtrip_preserves_empty_and_named_selections() {
+        let state = FilterState {
+            fit_filter: "Runnable".to_string(),
+            runtime_filter: "LM Studio".to_string(),
+            availability_filter: "Installed".to_string(),
+            tp_filter: "TP=4".to_string(),
+            context_filter: ">=128k".to_string(),
+            installed_first: true,
+            sort_column: "Params".to_string(),
+            sort_ascending: true,
+            selected_providers: Some(vec![]),
+            selected_use_cases: Some(vec!["Coding".to_string(), "Chat".to_string()]),
+            selected_capabilities: Some(vec!["Tool Use".to_string()]),
+            selected_quants: Some(vec!["Q4_K_M".to_string()]),
+            selected_run_modes: Some(vec!["GPU".to_string(), "CPU".to_string()]),
+            selected_params_buckets: Some(vec!["7-14B".to_string()]),
+        };
+        let path = temp_path("roundtrip-filter-state");
+
+        state.save_to_path(&path);
+        let loaded = FilterState::load_from_path(&path).expect("should load saved config");
+
+        assert_eq!(loaded.fit_filter, state.fit_filter);
+        assert_eq!(loaded.runtime_filter, state.runtime_filter);
+        assert_eq!(loaded.availability_filter, state.availability_filter);
+        assert_eq!(loaded.tp_filter, state.tp_filter);
+        assert_eq!(loaded.context_filter, state.context_filter);
+        assert_eq!(loaded.installed_first, state.installed_first);
+        assert_eq!(loaded.sort_column, state.sort_column);
+        assert_eq!(loaded.sort_ascending, state.sort_ascending);
+        assert_eq!(loaded.selected_providers, state.selected_providers);
+        assert_eq!(loaded.selected_use_cases, state.selected_use_cases);
+        assert_eq!(loaded.selected_capabilities, state.selected_capabilities);
+        assert_eq!(loaded.selected_quants, state.selected_quants);
+        assert_eq!(loaded.selected_run_modes, state.selected_run_modes);
+        assert_eq!(loaded.selected_params_buckets, state.selected_params_buckets);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn apply_filter_state_maps_saved_names_to_current_order() {
+        let (download_capability_tx, download_capability_rx) = mpsc::channel();
+        let (catalog_refresh_tx, catalog_refresh_rx) = mpsc::channel();
+        let mut app = App {
+            should_quit: false,
+            input_mode: super::InputMode::Normal,
+            search_query: String::new(),
+            cursor_position: 0,
+            specs: SystemSpecs {
+                total_ram_gb: 64.0,
+                available_ram_gb: 48.0,
+                total_cpu_cores: 16,
+                cpu_name: "Test CPU".to_string(),
+                has_gpu: true,
+                gpu_vram_gb: Some(24.0),
+                total_gpu_vram_gb: Some(24.0),
+                gpu_name: Some("RTX 4090".to_string()),
+                gpu_count: 1,
+                unified_memory: false,
+                backend: GpuBackend::Cuda,
+                gpus: vec![],
+                cluster_mode: false,
+                cluster_node_count: 0,
+            },
+            source_models: vec![],
+            base_context_limit: None,
+            all_fits: vec![],
+            filtered_fits: vec![],
+            providers: vec!["zeta".to_string(), "alpha".to_string(), "meta".to_string()],
+            selected_providers: vec![true, true, true],
+            use_cases: vec![UseCase::General, UseCase::Coding, UseCase::Chat],
+            selected_use_cases: vec![true, true, true],
+            capabilities: vec![Capability::Vision, Capability::ToolUse],
+            selected_capabilities: vec![true, true],
+            fit_filter: FitFilter::All,
+            runtime_filter: RuntimeFilter::Any,
+            availability_filter: AvailabilityFilter::All,
+            tp_filter: TpFilter::All,
+            context_filter: ContextFilter::All,
+            installed_first: false,
+            sort_column: llmfit_core::fit::SortColumn::Score,
+            sort_ascending: false,
+            selected_row: 0,
+            show_detail: false,
+            show_compare: false,
+            compare_mark_model: None,
+            show_multi_compare: false,
+            compare_models: vec![],
+            compare_scroll: 0,
+            show_plan: false,
+            plan_model_idx: None,
+            plan_field: super::PlanField::Context,
+            plan_context_input: String::new(),
+            plan_quant_input: String::new(),
+            plan_target_tps_input: String::new(),
+            plan_cursor_position: 0,
+            plan_estimate: None,
+            plan_error: None,
+            provider_cursor: 0,
+            use_case_cursor: 0,
+            capability_cursor: 0,
+            download_provider_cursor: 0,
+            download_provider_options: vec![],
+            download_provider_model: None,
+            ollama_available: false,
+            ollama_binary_available: false,
+            ollama_installed: HashSet::new(),
+            ollama_installed_count: 0,
+            ollama: llmfit_core::providers::OllamaProvider::new(),
+            mlx_available: false,
+            mlx_installed: HashSet::new(),
+            mlx: llmfit_core::providers::MlxProvider::new(),
+            llamacpp_available: false,
+            llamacpp_installed: HashSet::new(),
+            llamacpp_installed_count: 0,
+            llamacpp_detection_hint: String::new(),
+            llamacpp: llmfit_core::providers::LlamaCppProvider::new(),
+            docker_mr_available: false,
+            docker_mr_installed: HashSet::new(),
+            docker_mr_installed_count: 0,
+            docker_mr: llmfit_core::providers::DockerModelRunnerProvider::new(),
+            lmstudio_available: false,
+            lmstudio_installed: HashSet::new(),
+            lmstudio_installed_count: 0,
+            lmstudio: llmfit_core::providers::LmStudioProvider::new(),
+            vllm_available: false,
+            vllm_installed: HashSet::new(),
+            vllm_installed_count: 0,
+            vllm: llmfit_core::providers::VllmProvider::new(),
+            pull_active: None,
+            pull_status: None,
+            pull_percent: None,
+            pull_model_name: None,
+            pull_provider: None,
+            download_capabilities: HashMap::new(),
+            download_capability_inflight: HashSet::new(),
+            download_capability_tx,
+            download_capability_rx,
+            catalog_refresh_active: false,
+            catalog_refresh_tx,
+            catalog_refresh_rx,
+            tick_count: 0,
+            confirm_download: false,
+            visual_anchor: None,
+            select_column: 2,
+            quants: vec!["Q8_0".to_string(), "Q4_K_M".to_string()],
+            selected_quants: vec![true, true],
+            quant_cursor: 0,
+            run_modes: vec!["GPU".to_string(), "CPU+GPU".to_string(), "CPU".to_string()],
+            selected_run_modes: vec![true, true, true],
+            run_mode_cursor: 0,
+            params_buckets: vec!["<3B".to_string(), "7-14B".to_string()],
+            selected_params_buckets: vec![true, true],
+            params_bucket_cursor: 0,
+            theme: crate::theme::Theme::Default,
+            backend_hidden_count: 0,
+        };
+
+        let state = FilterState {
+            fit_filter: "Runnable".to_string(),
+            runtime_filter: "vLLM".to_string(),
+            availability_filter: "Installed".to_string(),
+            tp_filter: "TP=3".to_string(),
+            context_filter: ">=262k".to_string(),
+            installed_first: true,
+            sort_column: "Date".to_string(),
+            sort_ascending: true,
+            selected_providers: Some(vec!["meta".to_string()]),
+            selected_use_cases: Some(vec!["Coding".to_string()]),
+            selected_capabilities: Some(vec!["Tool Use".to_string()]),
+            selected_quants: Some(vec!["Q4_K_M".to_string()]),
+            selected_run_modes: Some(vec!["CPU".to_string()]),
+            selected_params_buckets: Some(vec!["7-14B".to_string()]),
+        };
+
+        app.apply_filter_state(&state);
+
+        assert_eq!(app.fit_filter, FitFilter::Runnable);
+        assert_eq!(app.runtime_filter, RuntimeFilter::Vllm);
+        assert_eq!(app.availability_filter, AvailabilityFilter::Installed);
+        assert_eq!(app.tp_filter, TpFilter::Tp3);
+        assert_eq!(app.context_filter, ContextFilter::AtLeast262k);
+        assert!(app.installed_first);
+        assert_eq!(app.sort_column, llmfit_core::fit::SortColumn::ReleaseDate);
+        assert!(app.sort_ascending);
+        assert_eq!(app.selected_providers, vec![false, false, true]);
+        assert_eq!(app.selected_use_cases, vec![false, true, false]);
+        assert_eq!(app.selected_capabilities, vec![false, true]);
+        assert_eq!(app.selected_quants, vec![false, true]);
+        assert_eq!(app.selected_run_modes, vec![false, false, true]);
+        assert_eq!(app.selected_params_buckets, vec![false, true]);
+    }
+
+    #[test]
+    fn reset_filters_restores_defaults() {
+        let mut app = App::with_specs_and_context(
+            SystemSpecs {
+                total_ram_gb: 64.0,
+                available_ram_gb: 48.0,
+                total_cpu_cores: 16,
+                cpu_name: "Test CPU".to_string(),
+                has_gpu: true,
+                gpu_vram_gb: Some(24.0),
+                total_gpu_vram_gb: Some(24.0),
+                gpu_name: Some("RTX 4090".to_string()),
+                gpu_count: 1,
+                unified_memory: false,
+                backend: GpuBackend::Cuda,
+                gpus: vec![],
+                cluster_mode: false,
+                cluster_node_count: 0,
+            },
+            None,
+        );
+
+        app.fit_filter = FitFilter::Runnable;
+        app.runtime_filter = RuntimeFilter::LmStudio;
+        app.availability_filter = AvailabilityFilter::Installed;
+        app.tp_filter = TpFilter::Tp4;
+        app.context_filter = ContextFilter::AtLeast128k;
+        app.installed_first = true;
+        app.sort_column = llmfit_core::fit::SortColumn::Params;
+        app.sort_ascending = true;
+        app.search_query = "nemotron".to_string();
+        app.cursor_position = app.search_query.len();
+        if !app.selected_providers.is_empty() {
+            app.selected_providers.fill(false);
+        }
+        if !app.selected_use_cases.is_empty() {
+            app.selected_use_cases.fill(false);
+        }
+        if !app.selected_capabilities.is_empty() {
+            app.selected_capabilities.fill(false);
+        }
+        if !app.selected_quants.is_empty() {
+            app.selected_quants.fill(false);
+        }
+        if !app.selected_run_modes.is_empty() {
+            app.selected_run_modes.fill(false);
+        }
+        if !app.selected_params_buckets.is_empty() {
+            app.selected_params_buckets.fill(false);
+        }
+
+        app.reset_filters();
+
+        assert_eq!(app.fit_filter, FitFilter::All);
+        assert_eq!(app.runtime_filter, RuntimeFilter::Any);
+        assert_eq!(app.availability_filter, AvailabilityFilter::All);
+        assert_eq!(app.tp_filter, TpFilter::All);
+        assert_eq!(app.context_filter, ContextFilter::All);
+        assert!(!app.installed_first);
+        assert_eq!(app.sort_column, llmfit_core::fit::SortColumn::Score);
+        assert!(!app.sort_ascending);
+        assert!(app.search_query.is_empty());
+        assert_eq!(app.cursor_position, 0);
+        assert!(app.selected_providers.iter().all(|selected| *selected));
+        assert!(app.selected_use_cases.iter().all(|selected| *selected));
+        assert!(app.selected_capabilities.iter().all(|selected| *selected));
+        assert!(app.selected_quants.iter().all(|selected| *selected));
+        assert!(app.selected_run_modes.iter().all(|selected| *selected));
+        assert!(app.selected_params_buckets.iter().all(|selected| *selected));
+        assert_eq!(app.pull_status.as_deref(), Some("Reset all filters"));
+    }
+
+    #[test]
+    fn llama_cpp_runtime_filter_rejects_safetensors_without_gguf_path() {
+        let (download_capability_tx, download_capability_rx) = mpsc::channel();
+        let (catalog_refresh_tx, catalog_refresh_rx) = mpsc::channel();
+        let app = App {
+            should_quit: false,
+            input_mode: super::InputMode::Normal,
+            search_query: String::new(),
+            cursor_position: 0,
+            specs: SystemSpecs {
+                total_ram_gb: 64.0,
+                available_ram_gb: 48.0,
+                total_cpu_cores: 16,
+                cpu_name: "Test CPU".to_string(),
+                has_gpu: true,
+                gpu_vram_gb: Some(24.0),
+                total_gpu_vram_gb: Some(24.0),
+                gpu_name: Some("RTX 4090".to_string()),
+                gpu_count: 1,
+                unified_memory: false,
+                backend: GpuBackend::Cuda,
+                gpus: vec![],
+                cluster_mode: false,
+                cluster_node_count: 0,
+            },
+            source_models: vec![],
+            base_context_limit: None,
+            all_fits: vec![],
+            filtered_fits: vec![],
+            providers: vec![],
+            selected_providers: vec![],
+            use_cases: vec![],
+            selected_use_cases: vec![],
+            capabilities: vec![],
+            selected_capabilities: vec![],
+            fit_filter: super::FitFilter::All,
+            runtime_filter: RuntimeFilter::LlamaCpp,
+            availability_filter: super::AvailabilityFilter::All,
+            tp_filter: super::TpFilter::All,
+            context_filter: super::ContextFilter::All,
+            installed_first: false,
+            sort_column: llmfit_core::fit::SortColumn::Score,
+            sort_ascending: false,
+            selected_row: 0,
+            show_detail: false,
+            show_compare: false,
+            compare_mark_model: None,
+            show_multi_compare: false,
+            compare_models: vec![],
+            compare_scroll: 0,
+            show_plan: false,
+            plan_model_idx: None,
+            plan_field: super::PlanField::Context,
+            plan_context_input: String::new(),
+            plan_quant_input: String::new(),
+            plan_target_tps_input: String::new(),
+            plan_cursor_position: 0,
+            plan_estimate: None,
+            plan_error: None,
+            provider_cursor: 0,
+            use_case_cursor: 0,
+            capability_cursor: 0,
+            download_provider_cursor: 0,
+            download_provider_options: vec![],
+            download_provider_model: None,
+            ollama_available: false,
+            ollama_binary_available: false,
+            ollama_installed: HashSet::new(),
+            ollama_installed_count: 0,
+            ollama: llmfit_core::providers::OllamaProvider::new(),
+            mlx_available: false,
+            mlx_installed: HashSet::new(),
+            mlx: llmfit_core::providers::MlxProvider::new(),
+            llamacpp_available: true,
+            llamacpp_installed: HashSet::new(),
+            llamacpp_installed_count: 0,
+            llamacpp_detection_hint: String::new(),
+            llamacpp: llmfit_core::providers::LlamaCppProvider::new(),
+            docker_mr_available: false,
+            docker_mr_installed: HashSet::new(),
+            docker_mr_installed_count: 0,
+            docker_mr: llmfit_core::providers::DockerModelRunnerProvider::new(),
+            lmstudio_available: false,
+            lmstudio_installed: HashSet::new(),
+            lmstudio_installed_count: 0,
+            lmstudio: llmfit_core::providers::LmStudioProvider::new(),
+            vllm_available: false,
+            vllm_installed: HashSet::new(),
+            vllm_installed_count: 0,
+            vllm: llmfit_core::providers::VllmProvider::new(),
+            pull_active: None,
+            pull_status: None,
+            pull_percent: None,
+            pull_model_name: None,
+            pull_provider: None,
+            download_capabilities: HashMap::new(),
+            download_capability_inflight: HashSet::new(),
+            download_capability_tx,
+            download_capability_rx,
+            catalog_refresh_active: false,
+            catalog_refresh_tx,
+            catalog_refresh_rx,
+            tick_count: 0,
+            confirm_download: false,
+            visual_anchor: None,
+            select_column: 2,
+            quants: vec![],
+            selected_quants: vec![],
+            quant_cursor: 0,
+            run_modes: vec![],
+            selected_run_modes: vec![],
+            run_mode_cursor: 0,
+            params_buckets: vec![],
+            selected_params_buckets: vec![],
+            params_bucket_cursor: 0,
+            theme: crate::theme::Theme::Default,
+            backend_hidden_count: 0,
+        };
+
+        let fit = ModelFit {
+            model: LlmModel {
+                name: "silx-ai/Quasar-10B".to_string(),
+                provider: "huggingface".to_string(),
+                parameter_count: "10B".to_string(),
+                parameters_raw: Some(10_000_000_000),
+                min_ram_gb: 20.0,
+                recommended_ram_gb: 32.0,
+                min_vram_gb: Some(18.0),
+                quantization: "bf16".to_string(),
+                context_length: 131_072,
+                use_case: "general".to_string(),
+                is_moe: false,
+                num_experts: None,
+                active_experts: None,
+                active_parameters: None,
+                release_date: None,
+                gguf_sources: vec![],
+                capabilities: vec![Capability::ToolUse],
+                format: ModelFormat::Safetensors,
+                num_attention_heads: None,
+                num_key_value_heads: None,
+            },
+            fit_level: FitLevel::Good,
+            run_mode: RunMode::Gpu,
+            memory_required_gb: 18.0,
+            memory_available_gb: 24.0,
+            utilization_pct: 75.0,
+            notes: vec![],
+            moe_offloaded_gb: None,
+            score: 90.0,
+            score_components: ScoreComponents {
+                quality: 90.0,
+                speed: 80.0,
+                fit: 75.0,
+                context: 95.0,
+            },
+            estimated_tps: 22.0,
+            best_quant: "bf16".to_string(),
+            use_case: UseCase::Agentic,
+            runtime: InferenceRuntime::LlamaCpp,
+            installed: false,
+        };
+
+        assert!(!app.runtime_filter_matches_fit(&fit));
+    }
+
+    #[test]
+    fn vllm_runtime_filter_keeps_currently_served_vllm_models() {
+        let (download_capability_tx, download_capability_rx) = mpsc::channel();
+        let (catalog_refresh_tx, catalog_refresh_rx) = mpsc::channel();
+        let mut vllm_installed = HashSet::new();
+        vllm_installed.insert("silx-ai/quasar-10b".to_string());
+        let app = App {
+            should_quit: false,
+            input_mode: super::InputMode::Normal,
+            search_query: String::new(),
+            cursor_position: 0,
+            specs: SystemSpecs {
+                total_ram_gb: 64.0,
+                available_ram_gb: 48.0,
+                total_cpu_cores: 16,
+                cpu_name: "Test CPU".to_string(),
+                has_gpu: true,
+                gpu_vram_gb: Some(24.0),
+                total_gpu_vram_gb: Some(24.0),
+                gpu_name: Some("RTX 4090".to_string()),
+                gpu_count: 1,
+                unified_memory: false,
+                backend: GpuBackend::Cuda,
+                gpus: vec![],
+                cluster_mode: false,
+                cluster_node_count: 0,
+            },
+            source_models: vec![],
+            base_context_limit: None,
+            all_fits: vec![],
+            filtered_fits: vec![],
+            providers: vec![],
+            selected_providers: vec![],
+            use_cases: vec![],
+            selected_use_cases: vec![],
+            capabilities: vec![],
+            selected_capabilities: vec![],
+            fit_filter: super::FitFilter::All,
+            runtime_filter: RuntimeFilter::Vllm,
+            availability_filter: super::AvailabilityFilter::All,
+            tp_filter: super::TpFilter::All,
+            context_filter: super::ContextFilter::All,
+            installed_first: false,
+            sort_column: llmfit_core::fit::SortColumn::Score,
+            sort_ascending: false,
+            selected_row: 0,
+            show_detail: false,
+            show_compare: false,
+            compare_mark_model: None,
+            show_multi_compare: false,
+            compare_models: vec![],
+            compare_scroll: 0,
+            show_plan: false,
+            plan_model_idx: None,
+            plan_field: super::PlanField::Context,
+            plan_context_input: String::new(),
+            plan_quant_input: String::new(),
+            plan_target_tps_input: String::new(),
+            plan_cursor_position: 0,
+            plan_estimate: None,
+            plan_error: None,
+            provider_cursor: 0,
+            use_case_cursor: 0,
+            capability_cursor: 0,
+            download_provider_cursor: 0,
+            download_provider_options: vec![],
+            download_provider_model: None,
+            ollama_available: false,
+            ollama_binary_available: false,
+            ollama_installed: HashSet::new(),
+            ollama_installed_count: 0,
+            ollama: llmfit_core::providers::OllamaProvider::new(),
+            mlx_available: false,
+            mlx_installed: HashSet::new(),
+            mlx: llmfit_core::providers::MlxProvider::new(),
+            llamacpp_available: false,
+            llamacpp_installed: HashSet::new(),
+            llamacpp_installed_count: 0,
+            llamacpp_detection_hint: String::new(),
+            llamacpp: llmfit_core::providers::LlamaCppProvider::new(),
+            docker_mr_available: false,
+            docker_mr_installed: HashSet::new(),
+            docker_mr_installed_count: 0,
+            docker_mr: llmfit_core::providers::DockerModelRunnerProvider::new(),
+            lmstudio_available: false,
+            lmstudio_installed: HashSet::new(),
+            lmstudio_installed_count: 0,
+            lmstudio: llmfit_core::providers::LmStudioProvider::new(),
+            vllm_available: true,
+            vllm_installed,
+            vllm_installed_count: 1,
+            vllm: llmfit_core::providers::VllmProvider::new(),
+            pull_active: None,
+            pull_status: None,
+            pull_percent: None,
+            pull_model_name: None,
+            pull_provider: None,
+            download_capabilities: HashMap::new(),
+            download_capability_inflight: HashSet::new(),
+            download_capability_tx,
+            download_capability_rx,
+            catalog_refresh_active: false,
+            catalog_refresh_tx,
+            catalog_refresh_rx,
+            tick_count: 0,
+            confirm_download: false,
+            visual_anchor: None,
+            select_column: 2,
+            quants: vec![],
+            selected_quants: vec![],
+            quant_cursor: 0,
+            run_modes: vec![],
+            selected_run_modes: vec![],
+            run_mode_cursor: 0,
+            params_buckets: vec![],
+            selected_params_buckets: vec![],
+            params_bucket_cursor: 0,
+            theme: crate::theme::Theme::Default,
+            backend_hidden_count: 0,
+        };
+
+        let fit = ModelFit {
+            model: LlmModel {
+                name: "silx-ai/Quasar-10B".to_string(),
+                provider: "huggingface".to_string(),
+                parameter_count: "10B".to_string(),
+                parameters_raw: Some(10_000_000_000),
+                min_ram_gb: 20.0,
+                recommended_ram_gb: 32.0,
+                min_vram_gb: Some(18.0),
+                quantization: "bf16".to_string(),
+                context_length: 131_072,
+                use_case: "general".to_string(),
+                is_moe: false,
+                num_experts: None,
+                active_experts: None,
+                active_parameters: None,
+                release_date: None,
+                gguf_sources: vec![],
+                capabilities: vec![Capability::ToolUse],
+                format: ModelFormat::Safetensors,
+                num_attention_heads: None,
+                num_key_value_heads: None,
+            },
+            fit_level: FitLevel::Good,
+            run_mode: RunMode::Gpu,
+            memory_required_gb: 18.0,
+            memory_available_gb: 24.0,
+            utilization_pct: 75.0,
+            notes: vec![],
+            moe_offloaded_gb: None,
+            score: 90.0,
+            score_components: ScoreComponents {
+                quality: 90.0,
+                speed: 80.0,
+                fit: 75.0,
+                context: 95.0,
+            },
+            estimated_tps: 22.0,
+            best_quant: "bf16".to_string(),
+            use_case: UseCase::Agentic,
+            runtime: InferenceRuntime::LlamaCpp,
+            installed: true,
+        };
+
+        assert!(app.runtime_filter_matches_fit(&fit));
+    }
+
+    #[test]
+    fn llama_cpp_runtime_filter_keeps_actual_gguf_models() {
+        let (download_capability_tx, download_capability_rx) = mpsc::channel();
+        let (catalog_refresh_tx, catalog_refresh_rx) = mpsc::channel();
+        let app = App {
+            should_quit: false,
+            input_mode: super::InputMode::Normal,
+            search_query: String::new(),
+            cursor_position: 0,
+            specs: SystemSpecs {
+                total_ram_gb: 64.0,
+                available_ram_gb: 48.0,
+                total_cpu_cores: 16,
+                cpu_name: "Test CPU".to_string(),
+                has_gpu: true,
+                gpu_vram_gb: Some(24.0),
+                total_gpu_vram_gb: Some(24.0),
+                gpu_name: Some("RTX 4090".to_string()),
+                gpu_count: 1,
+                unified_memory: false,
+                backend: GpuBackend::Cuda,
+                gpus: vec![],
+                cluster_mode: false,
+                cluster_node_count: 0,
+            },
+            source_models: vec![],
+            base_context_limit: None,
+            all_fits: vec![],
+            filtered_fits: vec![],
+            providers: vec![],
+            selected_providers: vec![],
+            use_cases: vec![],
+            selected_use_cases: vec![],
+            capabilities: vec![],
+            selected_capabilities: vec![],
+            fit_filter: super::FitFilter::All,
+            runtime_filter: RuntimeFilter::LlamaCpp,
+            availability_filter: super::AvailabilityFilter::All,
+            tp_filter: super::TpFilter::All,
+            context_filter: super::ContextFilter::All,
+            installed_first: false,
+            sort_column: llmfit_core::fit::SortColumn::Score,
+            sort_ascending: false,
+            selected_row: 0,
+            show_detail: false,
+            show_compare: false,
+            compare_mark_model: None,
+            show_multi_compare: false,
+            compare_models: vec![],
+            compare_scroll: 0,
+            show_plan: false,
+            plan_model_idx: None,
+            plan_field: super::PlanField::Context,
+            plan_context_input: String::new(),
+            plan_quant_input: String::new(),
+            plan_target_tps_input: String::new(),
+            plan_cursor_position: 0,
+            plan_estimate: None,
+            plan_error: None,
+            provider_cursor: 0,
+            use_case_cursor: 0,
+            capability_cursor: 0,
+            download_provider_cursor: 0,
+            download_provider_options: vec![],
+            download_provider_model: None,
+            ollama_available: false,
+            ollama_binary_available: false,
+            ollama_installed: HashSet::new(),
+            ollama_installed_count: 0,
+            ollama: llmfit_core::providers::OllamaProvider::new(),
+            mlx_available: false,
+            mlx_installed: HashSet::new(),
+            mlx: llmfit_core::providers::MlxProvider::new(),
+            llamacpp_available: true,
+            llamacpp_installed: HashSet::new(),
+            llamacpp_installed_count: 0,
+            llamacpp_detection_hint: String::new(),
+            llamacpp: llmfit_core::providers::LlamaCppProvider::new(),
+            docker_mr_available: false,
+            docker_mr_installed: HashSet::new(),
+            docker_mr_installed_count: 0,
+            docker_mr: llmfit_core::providers::DockerModelRunnerProvider::new(),
+            lmstudio_available: false,
+            lmstudio_installed: HashSet::new(),
+            lmstudio_installed_count: 0,
+            lmstudio: llmfit_core::providers::LmStudioProvider::new(),
+            vllm_available: false,
+            vllm_installed: HashSet::new(),
+            vllm_installed_count: 0,
+            vllm: llmfit_core::providers::VllmProvider::new(),
+            pull_active: None,
+            pull_status: None,
+            pull_percent: None,
+            pull_model_name: None,
+            pull_provider: None,
+            download_capabilities: HashMap::new(),
+            download_capability_inflight: HashSet::new(),
+            download_capability_tx,
+            download_capability_rx,
+            catalog_refresh_active: false,
+            catalog_refresh_tx,
+            catalog_refresh_rx,
+            tick_count: 0,
+            confirm_download: false,
+            visual_anchor: None,
+            select_column: 2,
+            quants: vec![],
+            selected_quants: vec![],
+            quant_cursor: 0,
+            run_modes: vec![],
+            selected_run_modes: vec![],
+            run_mode_cursor: 0,
+            params_buckets: vec![],
+            selected_params_buckets: vec![],
+            params_bucket_cursor: 0,
+            theme: crate::theme::Theme::Default,
+            backend_hidden_count: 0,
+        };
+
+        let fit = ModelFit {
+            model: LlmModel {
+                name: "Qwen/Qwen2.5-7B-Instruct".to_string(),
+                provider: "huggingface".to_string(),
+                parameter_count: "7B".to_string(),
+                parameters_raw: Some(7_000_000_000),
+                min_ram_gb: 8.0,
+                recommended_ram_gb: 12.0,
+                min_vram_gb: Some(4.0),
+                quantization: "Q4_K_M".to_string(),
+                context_length: 131_072,
+                use_case: "chat".to_string(),
+                is_moe: false,
+                num_experts: None,
+                active_experts: None,
+                active_parameters: None,
+                release_date: None,
+                gguf_sources: vec![llmfit_core::models::GgufSource {
+                    repo: "bartowski/Qwen2.5-7B-Instruct-GGUF".to_string(),
+                    provider: "bartowski".to_string(),
+                }],
+                capabilities: vec![],
+                format: ModelFormat::Gguf,
+                num_attention_heads: None,
+                num_key_value_heads: None,
+            },
+            fit_level: FitLevel::Good,
+            run_mode: RunMode::Gpu,
+            memory_required_gb: 4.0,
+            memory_available_gb: 24.0,
+            utilization_pct: 16.0,
+            notes: vec![],
+            moe_offloaded_gb: None,
+            score: 92.0,
+            score_components: ScoreComponents {
+                quality: 88.0,
+                speed: 91.0,
+                fit: 96.0,
+                context: 95.0,
+            },
+            estimated_tps: 45.0,
+            best_quant: "Q4_K_M".to_string(),
+            use_case: UseCase::Chat,
+            runtime: InferenceRuntime::LlamaCpp,
+            installed: false,
+        };
+
+        assert!(app.runtime_filter_matches_fit(&fit));
+    }
 }

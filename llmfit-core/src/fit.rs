@@ -164,12 +164,12 @@ impl ModelFit {
         // the correct quantization hierarchy.
         // Honour the force_runtime override first if provided; otherwise
         // pre-quantized models default to vLLM, falling back to auto-detect.
-        let runtime = if let Some(forced) = force_runtime {
-            forced
-        } else if system.cluster_mode {
+        let runtime = if system.cluster_mode {
             InferenceRuntime::Vllm
         } else if model.is_prequantized() {
             InferenceRuntime::Vllm
+        } else if let Some(forced) = force_runtime {
+            forced
         } else if system.backend == GpuBackend::Metal && system.unified_memory {
             InferenceRuntime::Mlx
         } else {
@@ -1554,6 +1554,22 @@ mod tests {
 
         let fit = ModelFit::analyze(&model, &system);
         assert_eq!(fit.runtime, InferenceRuntime::LlamaCpp);
+    }
+
+    #[test]
+    fn test_forced_runtime_does_not_override_prequantized_vllm_models() {
+        let mut model = test_model("7B", 4.0, Some(4.0));
+        model.format = models::ModelFormat::Awq;
+        let system = test_system(32.0, true, Some(24.0));
+
+        let fit = ModelFit::analyze_with_forced_runtime(
+            &model,
+            &system,
+            None,
+            Some(InferenceRuntime::LlamaCpp),
+        );
+
+        assert_eq!(fit.runtime, InferenceRuntime::Vllm);
     }
 
     #[test]
