@@ -1,170 +1,102 @@
-# AGENTS.md
+# PROJECT KNOWLEDGE BASE
 
-Instructions for AI agents contributing to this codebase.
+**Generated:** 2026-03-28 22:09 America/New_York
+**Commit:** `7b40343`
+**Branch:** `main`
 
----
+## OVERVIEW
 
-## Project overview
+`llmfit` is a workspace, not a single crate. Rust packages live in `llmfit-core`, `llmfit-tui`, and `llmfit-desktop`; `llmfit-web` is a React/Vite dashboard embedded into the TUI server build.
 
-`llmfit` is a Rust CLI/TUI tool that matches LLM models against local system hardware (RAM, CPU, GPU). It detects system specs, loads a model database from embedded JSON, scores each model's fit, and presents results in an interactive terminal UI or classic table output.
+## STRUCTURE
 
-## Language and toolchain
-
-- Rust, edition 2024.
-- Build with `cargo build`. Run with `cargo run`.
-- No nightly features required. Stable toolchain only.
-- Minimum supported Rust version: whatever edition 2024 requires (1.85+).
-
-## Architecture
-
-```
-main.rs          Entrypoint. Parses CLI args via clap. Launches TUI by default,
-                 falls back to CLI subcommands (system, list, fit, search, info)
-                 or --cli flag for classic table output.
-
-hardware.rs      SystemSpecs::detect() reads RAM/CPU via sysinfo crate.
-                 detect_gpu() shells out to nvidia-smi / rocm-smi, and
-                 detects Apple Silicon via system_profiler.
-                 On unified memory (Apple Silicon), VRAM = system RAM.
-                 No async. No unsafe.
-
-models.rs        LlmModel struct. ModelDatabase loads from data/hf_models.json
-                 embedded via include_str!() at compile time. No runtime file I/O.
-
-fit.rs           FitLevel enum (Perfect, Good, Marginal, TooTight).
-                 RunMode enum (Gpu, CpuOffload, CpuOnly).
-                 ModelFit::analyze() compares a model against SystemSpecs,
-                 selecting the best available execution path (GPU > CPU offload > CPU).
-                 rank_models_by_fit() sorts by fit level, then run mode, then utilization.
-
-display.rs       CLI-mode table rendering using the tabled crate.
-                 Only used when --cli flag or subcommands are invoked.
-
-tui_app.rs       TUI application state. Holds all models, filters (search text,
-                 provider toggles, fit filter), selection index.
-                 All filtering logic is here -- apply_filters() recomputes
-                 filtered_fits indices whenever inputs change.
-
-tui_ui.rs        Rendering with ratatui. Four layout regions: system bar,
-                 search/filter bar, model table (or detail pane), status bar.
-                 Stateless rendering -- reads from App, writes to Frame.
-
-tui_events.rs    Keyboard event handling with crossterm. Two modes: Normal
-                 (navigation, filter toggling, quit) and Search (text input).
+```text
+llmfit/
+├── llmfit-core/      # Shared fitting engine, hardware detection, providers, updates
+├── llmfit-tui/       # CLI binary, TUI, REST API, web-asset embed build step
+├── llmfit-web/       # React/Vite dashboard served by llmfit-tui
+├── llmfit-desktop/   # Tauri desktop app using llmfit-core
+├── scripts/          # Data regeneration + verification helpers
+├── data/             # Mirrored/generated data for repo-level tooling/docs
+└── .github/workflows/# CI builds web first, then Rust checks/tests
 ```
 
-## Data flow
+## WHERE TO LOOK
 
-1. `App::new()` calls `SystemSpecs::detect()` and `ModelDatabase::new()`.
-2. Every model is analyzed into a `ModelFit` via `ModelFit::analyze()`.
-3. Results are sorted by `rank_models_by_fit()`.
-4. `apply_filters()` produces `filtered_fits: Vec<usize>` (indices into `all_fits`).
-5. The TUI render loop reads `App` state and draws via `tui_ui::draw()`.
-6. `tui_events::handle_events()` mutates `App` state, triggering re-render.
+| Task | Location | Notes |
+|------|----------|-------|
+| Fit/scoring logic | `llmfit-core/src/fit.rs` | Runtime choice, fit levels, ranking, score components |
+| Hardware detection | `llmfit-core/src/hardware.rs` | GPU backends, unified memory, cluster detection |
+| Model DB + parsing | `llmfit-core/src/models.rs` | Embedded JSON comes from `llmfit-core/data/*.json` |
+| Provider integration | `llmfit-core/src/providers.rs` | Ollama / llama.cpp / MLX / Docker MR / LM Studio |
+| Online update/cache | `llmfit-core/src/update.rs` | Merges cache into embedded DB at startup |
+| CLI subcommands | `llmfit-tui/src/main.rs` | Main binary, clap surface, TUI launch, dashboard auto-start |
+| TUI state | `llmfit-tui/src/tui_app.rs` | Filters, selection, provider state, plan mode |
+| TUI rendering | `llmfit-tui/src/tui_ui.rs` | Stateless drawing only |
+| REST API + embedded web | `llmfit-tui/src/serve_api.rs`, `llmfit-tui/build.rs` | `llmfit-tui/build.rs` embeds `llmfit-web/dist` or a fallback page |
+| Web dashboard | `llmfit-web/src/*` | React client for `/api/v1/*`; tests via Vitest |
+| Desktop app | `llmfit-desktop/src/main.rs`, `llmfit-desktop/ui/*` | Tauri commands + static web UI |
+| Data regeneration | `scripts/scrape_hf_models.py`, `scripts/scrape_docker_models.py` | Generates model JSON into package data |
 
-## Model database
+## CONVENTIONS
 
-- Source: `data/hf_models.json` (33 models).
-- Generated by `scripts/scrape_hf_models.py` (Python, stdlib only, no pip deps).
-- Embedded at compile time via `include_str!("../data/hf_models.json")`.
-- Schema per entry: name, provider, parameter_count, min_ram_gb, recommended_ram_gb, min_vram_gb, quantization, context_length, use_case.
-- `min_vram_gb` is VRAM needed for GPU inference. `min_ram_gb` is system RAM needed for CPU inference. Both are derived from the same parameter count.
-- RAM formula: `params * 0.5 bytes (Q4_K_M) / 1024^3 * 1.2 overhead`.
-- VRAM formula: `params * 0.5 bytes (Q4_K_M) / 1024^3 * 1.1 activation overhead`.
-- Recommended RAM: `model_size * 2.0`.
-
-Do not manually edit `hf_models.json`. Regenerate it by running the scraper:
-
-```sh
-python3 scripts/scrape_hf_models.py
-```
-
-The scraper has hardcoded fallback entries for gated models that require authentication.
-
-## Conventions
-
+- Workspace root `Cargo.toml` is only a workspace manifest; package-specific details live under each crate.
+- Default workspace members are `llmfit-core` and `llmfit-tui`; desktop is separate work.
 - No `unsafe` code.
-- No `.unwrap()` on user-facing paths. Use proper error handling or `expect()` with a descriptive message for internal invariants only.
-- Fit levels are ordered: Perfect > Good > Marginal > TooTight. Do not add levels without updating `rank_models_by_fit()` sort logic.
-- Fit is VRAM-first. GPU inference with sufficient VRAM is the ideal path. CPU inference via system RAM is a fallback. The `RunMode` enum tracks which memory pool is being used (Gpu, CpuOffload, CpuOnly).
-- `min_vram_gb` is the VRAM needed to load model weights on GPU. `min_ram_gb` is the system RAM needed for CPU-only inference (same weights, loaded into RAM instead). They represent the same workload on different hardware paths.
-- On Apple Silicon (unified memory), VRAM = system RAM. The `CpuOffload` path is skipped because there is no separate RAM pool to spill to. `SystemSpecs::unified_memory` tracks this.
-- TUI rendering is stateless. `tui_ui::draw()` must not mutate `App`. Pass `&mut App` only for `TableState` widget requirements -- do not use it to change application state.
-- Event handling in `tui_events.rs` is the sole place that mutates `App` in the TUI loop.
-- Keep `display.rs` and `tui_*.rs` independent. The CLI path must work without initializing any TUI state.
+- No `.unwrap()` on user-facing paths. `expect()` is acceptable only for internal invariants with a descriptive message.
+- Fit remains VRAM-first; CPU/system RAM is fallback.
+- Unified-memory systems skip split VRAM/RAM offload assumptions.
+- TUI rendering must stay stateless; mutation belongs in `tui_app.rs` / `tui_events.rs`, not in drawing code.
+- `display.rs` and TUI modules stay independent; CLI mode must work without TUI state.
+- Generated model data is source-controlled. Regenerate via scripts; do not hand-edit JSON.
 
-## Adding a new model to the database
+## ANTI-PATTERNS (THIS PROJECT)
 
-1. Add the model's HuggingFace repo ID to `TARGET_MODELS` in `scripts/scrape_hf_models.py`.
-2. If the model is gated (requires HF auth), add a fallback entry to the `FALLBACK` dict in the same script.
-3. Run `python3 scripts/scrape_hf_models.py`.
-4. Verify the output in `data/hf_models.json`.
-5. Run `cargo build` to verify compilation.
+- Re-introducing the old single-crate mental model (`src/*.rs` at repo root) — current code is package-scoped.
+- Editing `llmfit-core/data/hf_models.json` or `llmfit-core/data/docker_models.json` by hand.
+- Forgetting that `llmfit-tui/build.rs` depends on `llmfit-web/dist` and falls back when assets are missing.
+- Mixing CLI rendering concerns into TUI modules, or mutating app state inside `tui_ui.rs`.
+- Treating Apple unified memory like discrete GPU + RAM pools.
 
-## Adding a new filter
+## UNIQUE STYLES
 
-1. Add the filter state to `App` in `tui_app.rs`.
-2. Add filtering logic inside `apply_filters()`.
-3. Add the keybinding in `tui_events.rs` (Normal mode handler).
-4. Add the UI widget in `tui_ui.rs` (`draw_search_and_filters()` function).
-5. Update the status bar help text in `draw_status_bar()`.
+- Docs in `README.md` may lag behind workspace internals; verify current code paths before trusting old top-level descriptions.
+- The HF scraper writes to both `data/hf_models.json` and `llmfit-core/data/hf_models.json`; runtime embedding uses the package-local file.
+- CI always builds `llmfit-web` before Rust test/check/clippy jobs; only the `test` job runs `npm test`.
 
-## Adding a new CLI subcommand
+## COMMANDS
 
-1. Add a variant to the `Commands` enum in `main.rs`.
-2. Add the match arm in the `main()` function's command dispatch.
-3. Use `display.rs` functions for output, or add new ones as needed.
+```bash
+# Default-member Rust checks (root cargo commands skip llmfit-desktop)
+cargo check --all-targets --all-features
+cargo test --verbose
+cargo fmt --all
+cargo clippy --all-targets --all-features
 
-## Testing
+# Full workspace / desktop-specific
+cargo check --workspace --all-targets --all-features
+cargo test --workspace --verbose
+cargo check -p llmfit-desktop
 
-There are no tests yet. When adding tests:
+# Main binary
+cargo run -p llmfit -- --cli
+cargo run -p llmfit -- serve --host 127.0.0.1 --port 8787
 
-- Unit tests for `fit.rs` logic (given known SystemSpecs and LlmModel values, assert correct FitLevel).
-- Unit tests for `models.rs` (verify JSON parsing, search matching).
-- Integration tests for CLI subcommands via `assert_cmd` crate.
-- TUI is difficult to unit test. Keep rendering stateless and test the state mutations in `tui_app.rs` directly.
+# Web dashboard
+cd llmfit-web && npm ci && npm run build
+cd llmfit-web && npm test
 
-## Dependencies policy
+# Desktop app
+cargo run -p llmfit-desktop
 
-- Prefer crates that are well-maintained and have minimal transitive dependencies.
-- `sysinfo` is the system detection crate. Do not replace it with raw platform calls.
-- `ratatui` + `crossterm` is the TUI stack. Do not mix in `termion` or `ncurses`.
-- `clap` with derive feature for CLI parsing. Do not use manual arg parsing.
-- The Python scraper uses only stdlib (`urllib`, `json`). Do not add pip dependencies.
-
-## Common tasks
-
-```sh
-# Build
-cargo build
-
-# Run TUI
-cargo run
-
-# Run CLI mode
-cargo run -- --cli
-
-# Run specific subcommand
-cargo run -- system
-cargo run -- fit --perfect -n 5
-cargo run -- search "llama"
-
-# Refresh model database
-python3 scripts/scrape_hf_models.py && cargo build
-
-# Check for compilation issues
-cargo check
-
-# Format code
-cargo fmt
-
-# Lint
-cargo clippy
+# Data refresh
+python3 scripts/scrape_hf_models.py
+python3 scripts/scrape_docker_models.py
+python3 scripts/test_api.py --spawn
 ```
 
-## Platform notes
+## NOTES
 
-- GPU detection shells out to `nvidia-smi` (NVIDIA) and `rocm-smi` (AMD). These are best-effort and fail silently if unavailable.
-- Apple Silicon detection uses `system_profiler SPDisplaysDataType`. On unified memory Macs, VRAM is reported as available system RAM (same pool).
-- `sysinfo` handles cross-platform RAM/CPU. No conditional compilation needed.
-- The TUI uses crossterm which works on Linux, macOS, and Windows terminals.
+- LSP codemap was unavailable during generation (`rust-analyzer` missing), so file-level structure was derived from source/module reads.
+- `scripts/update_models.sh` still reports root `data/hf_models.json`; runtime code embeds `llmfit-core/data/hf_models.json`, so keep both in sync.
+- Child `AGENTS.md` files exist for package-local rules. Read the nearest one before editing.
