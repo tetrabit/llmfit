@@ -28,6 +28,7 @@ pub fn handle_events(app: &mut App) -> std::io::Result<bool> {
             InputMode::QuantPopup => handle_quant_popup_mode(app, key),
             InputMode::RunModePopup => handle_run_mode_popup_mode(app, key),
             InputMode::ParamsBucketPopup => handle_params_bucket_popup_mode(app, key),
+            InputMode::LicensePopup => handle_license_popup_mode(app, key),
         }
         return Ok(true);
     }
@@ -95,6 +96,7 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) {
         KeyCode::Char('P') => app.open_provider_popup(),
         KeyCode::Char('U') => app.open_use_case_popup(),
         KeyCode::Char('C') => app.open_capability_popup(),
+        KeyCode::Char('L') => app.open_license_popup(),
 
         // Installed-first sort toggle (any provider)
         KeyCode::Char('i')
@@ -320,6 +322,21 @@ fn handle_params_bucket_popup_mode(app: &mut App, key: KeyEvent) {
         KeyCode::Char(' ') | KeyCode::Enter => app.params_bucket_popup_toggle(),
 
         KeyCode::Char('a') => app.params_bucket_popup_select_all(),
+
+        _ => {}
+    }
+}
+
+fn handle_license_popup_mode(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('L') | KeyCode::Char('q') => app.close_license_popup(),
+
+        KeyCode::Up | KeyCode::Char('k') => app.license_popup_up(),
+        KeyCode::Down | KeyCode::Char('j') => app.license_popup_down(),
+
+        KeyCode::Char(' ') | KeyCode::Enter => app.license_popup_toggle(),
+
+        KeyCode::Char('a') => app.license_popup_select_all(),
 
         _ => {}
     }

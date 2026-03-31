@@ -69,6 +69,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         draw_run_mode_popup(frame, app, &tc);
     } else if app.input_mode == InputMode::ParamsBucketPopup {
         draw_params_bucket_popup(frame, app, &tc);
+    } else if app.input_mode == InputMode::LicensePopup {
+        draw_license_popup(frame, app, &tc);
     }
 }
 
@@ -273,7 +275,8 @@ fn draw_search_and_filters(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeC
         | InputMode::Select
         | InputMode::QuantPopup
         | InputMode::RunModePopup
-        | InputMode::ParamsBucketPopup => Style::default().fg(tc.muted),
+        | InputMode::ParamsBucketPopup
+        | InputMode::LicensePopup => Style::default().fg(tc.muted),
     };
 
     let search_text = if app.search_query.is_empty() && app.input_mode == InputMode::Normal {
@@ -995,6 +998,13 @@ fn render_compare_panel(
             ),
         ]),
         Line::from(vec![
+            Span::styled("  License:", Style::default().fg(tc.muted)),
+            Span::styled(
+                format!(" {}", fit.model.license.as_deref().unwrap_or("Unknown")),
+                Style::default().fg(tc.fg),
+            ),
+        ]),
+        Line::from(vec![
             Span::styled("  Score: ", Style::default().fg(tc.muted)),
             Span::styled(metrics.score.clone(), metrics.score_style),
         ]),
@@ -1292,6 +1302,16 @@ fn draw_multi_compare(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors
         styles: vec![Style::default().fg(tc.muted); n],
     });
 
+    // License
+    rows.push(AttrRow {
+        label: "License",
+        values: visible_models
+            .iter()
+            .map(|m| m.model.license.as_deref().unwrap_or("Unknown").to_string())
+            .collect(),
+        styles: vec![Style::default().fg(tc.muted); n],
+    });
+
     // Runtime
     rows.push(AttrRow {
         label: "Runtime",
@@ -1450,6 +1470,13 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
             Span::styled("  Released:    ", Style::default().fg(tc.muted)),
             Span::styled(
                 fit.model.release_date.as_deref().unwrap_or("Unknown"),
+                Style::default().fg(tc.fg),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  License:     ", Style::default().fg(tc.muted)),
+            Span::styled(
+                fit.model.license.as_deref().unwrap_or("Unknown"),
                 Style::default().fg(tc.fg),
             ),
         ]),
@@ -2388,7 +2415,7 @@ fn status_keys_and_mode(app: &App) -> (String, String) {
             };
             (
                 format!(
-                    " ↑↓/jk:nav  {}  /:search  f:fit  s:sort  v:visual  V:select  t:theme  p:plan  m:mark  c:compare  x:clear mark  y:copy{}  P:providers  U:use cases  C:caps  q:quit  tok/s*:est",
+                    " ↑↓/jk:nav  {}  /:search  f:fit  s:sort  v:visual  V:select  t:theme  p:plan  m:mark  c:compare  x:clear mark  y:copy{}  P:providers  U:use cases  C:caps  L:licenses  q:quit  tok/s*:est",
                     detail_key, ollama_keys,
                 ),
                 "NORMAL".to_string(),
@@ -2451,6 +2478,10 @@ fn status_keys_and_mode(app: &App) -> (String, String) {
         InputMode::ParamsBucketPopup => (
             "  ↑↓/jk:navigate  Space:toggle  a:all/none  Esc:close".to_string(),
             "PARAMS".to_string(),
+        ),
+        InputMode::LicensePopup => (
+            "  ↑↓/jk:navigate  Space:toggle  a:all/none  Esc:close".to_string(),
+            "LICENSE".to_string(),
         ),
     }
 }
@@ -2720,6 +2751,81 @@ fn draw_params_bucket_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
 
     let active_count = app.selected_params_buckets.iter().filter(|&&s| s).count();
     let title = format!(" Params ({}/{}) ", active_count, total);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(tc.accent_secondary))
+        .title(title)
+        .title_style(
+            Style::default()
+                .fg(tc.accent_secondary)
+                .add_modifier(Modifier::BOLD),
+        );
+
+    let paragraph = Paragraph::new(lines).block(block);
+    frame.render_widget(paragraph, popup_area);
+}
+
+fn draw_license_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
+    let area = frame.area();
+
+    let max_name_len = app.licenses.iter().map(|l| l.len()).max().unwrap_or(10);
+    let popup_width = (max_name_len as u16 + 10).min(area.width.saturating_sub(4));
+    let popup_height = (app.licenses.len() as u16 + 2).min(area.height.saturating_sub(4));
+
+    let x = area.x + (area.width.saturating_sub(popup_width)) / 2;
+    let y = area.y + (area.height.saturating_sub(popup_height)) / 2;
+    let popup_area = Rect::new(x, y, popup_width, popup_height);
+
+    frame.render_widget(Clear, popup_area);
+
+    let inner_height = popup_height.saturating_sub(2) as usize;
+    let total = app.licenses.len();
+
+    let scroll_offset = if app.license_cursor >= inner_height {
+        app.license_cursor - inner_height + 1
+    } else {
+        0
+    };
+
+    let lines: Vec<Line> = app
+        .licenses
+        .iter()
+        .enumerate()
+        .skip(scroll_offset)
+        .take(inner_height)
+        .map(|(i, name)| {
+            let checkbox = if app.selected_licenses[i] {
+                "[x]"
+            } else {
+                "[ ]"
+            };
+            let is_cursor = i == app.license_cursor;
+
+            let style = if is_cursor {
+                if app.selected_licenses[i] {
+                    Style::default()
+                        .fg(tc.good)
+                        .add_modifier(Modifier::BOLD)
+                        .bg(tc.highlight_bg)
+                } else {
+                    Style::default()
+                        .fg(tc.fg)
+                        .add_modifier(Modifier::BOLD)
+                        .bg(tc.highlight_bg)
+                }
+            } else if app.selected_licenses[i] {
+                Style::default().fg(tc.good)
+            } else {
+                Style::default().fg(tc.muted)
+            };
+
+            Line::from(Span::styled(format!(" {} {}", checkbox, name), style))
+        })
+        .collect();
+
+    let active_count = app.selected_licenses.iter().filter(|&&s| s).count();
+    let title = format!(" License ({}/{}) ", active_count, total);
 
     let block = Block::default()
         .borders(Borders::ALL)

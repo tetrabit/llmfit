@@ -733,6 +733,7 @@ mod tests {
             format: crate::models::ModelFormat::default(),
             num_attention_heads: None,
             num_key_value_heads: None,
+            license: None,
         }
     }
 

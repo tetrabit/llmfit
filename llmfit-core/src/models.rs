@@ -249,6 +249,19 @@ pub struct LlmModel {
     /// Number of key-value heads for GQA (defaults to num_attention_heads if None).
     #[serde(default)]
     pub num_key_value_heads: Option<u32>,
+    /// Model license (e.g. "apache-2.0", "mit", "llama3.1")
+    #[serde(default)]
+    pub license: Option<String>,
+}
+
+/// Returns true if a model's license matches any in the comma-separated filter string.
+/// Models without a license never match.
+pub fn matches_license_filter(license: &Option<String>, filter: &str) -> bool {
+    let allowed: Vec<String> = filter.split(',').map(|s| s.trim().to_lowercase()).collect();
+    license
+        .as_ref()
+        .map(|l| allowed.contains(&l.to_lowercase()))
+        .unwrap_or(false)
 }
 
 /// A known GGUF download source for a model on HuggingFace.
@@ -441,6 +454,8 @@ struct HfModelEntry {
     hf_downloads: u64,
     #[serde(default)]
     hf_likes: u64,
+    #[serde(default)]
+    license: Option<String>,
 }
 
 const HF_MODELS_JSON: &str = include_str!("../data/hf_models.json");
@@ -492,6 +507,7 @@ fn load_embedded() -> Vec<LlmModel> {
                 format: e.format,
                 num_attention_heads: None,
                 num_key_value_heads: None,
+                license: e.license,
             };
             model.capabilities = Capability::infer(&model);
             model
@@ -724,6 +740,7 @@ mod tests {
             format: ModelFormat::default(),
             num_attention_heads: None,
             num_key_value_heads: None,
+            license: None,
         };
 
         // Large budget should return mlx-8bit (best in MLX hierarchy)
@@ -797,6 +814,7 @@ mod tests {
             format: ModelFormat::default(),
             num_attention_heads: None,
             num_key_value_heads: None,
+            license: None,
         };
         assert_eq!(model.params_b(), 7.0);
     }
@@ -824,6 +842,7 @@ mod tests {
             format: ModelFormat::default(),
             num_attention_heads: None,
             num_key_value_heads: None,
+            license: None,
         };
         assert_eq!(model.params_b(), 13.0);
     }
@@ -851,6 +870,7 @@ mod tests {
             format: ModelFormat::default(),
             num_attention_heads: None,
             num_key_value_heads: None,
+            license: None,
         };
         assert_eq!(model.params_b(), 0.5);
     }
@@ -878,6 +898,7 @@ mod tests {
             format: ModelFormat::default(),
             num_attention_heads: None,
             num_key_value_heads: None,
+            license: None,
         };
 
         let mem = model.estimate_memory_gb("Q4_K_M", 4096);
@@ -913,6 +934,7 @@ mod tests {
             format: ModelFormat::default(),
             num_attention_heads: None,
             num_key_value_heads: None,
+            license: None,
         };
 
         // Large budget should return best quant
@@ -954,6 +976,7 @@ mod tests {
             format: ModelFormat::default(),
             num_attention_heads: None,
             num_key_value_heads: None,
+            license: None,
         };
         assert!(dense_model.moe_active_vram_gb().is_none());
 
@@ -979,6 +1002,7 @@ mod tests {
             format: ModelFormat::default(),
             num_attention_heads: None,
             num_key_value_heads: None,
+            license: None,
         };
         let vram = moe_model.moe_active_vram_gb();
         assert!(vram.is_some());
@@ -1012,6 +1036,7 @@ mod tests {
             format: ModelFormat::default(),
             num_attention_heads: None,
             num_key_value_heads: None,
+            license: None,
         };
         assert!(dense_model.moe_offloaded_ram_gb().is_none());
 
@@ -1037,6 +1062,7 @@ mod tests {
             format: ModelFormat::default(),
             num_attention_heads: None,
             num_key_value_heads: None,
+            license: None,
         };
         let offloaded = moe_model.moe_offloaded_ram_gb();
         assert!(offloaded.is_some());
@@ -1072,6 +1098,7 @@ mod tests {
             format: ModelFormat::default(),
             num_attention_heads: None,
             num_key_value_heads: None,
+            license: None,
         };
         assert_eq!(UseCase::from_model(&model), UseCase::Coding);
     }
@@ -1099,6 +1126,7 @@ mod tests {
             format: ModelFormat::default(),
             num_attention_heads: None,
             num_key_value_heads: None,
+            license: None,
         };
         assert_eq!(UseCase::from_model(&model), UseCase::Embedding);
     }
@@ -1126,6 +1154,7 @@ mod tests {
             format: ModelFormat::default(),
             num_attention_heads: None,
             num_key_value_heads: None,
+            license: None,
         };
         assert_eq!(UseCase::from_model(&model), UseCase::Reasoning);
     }
@@ -1205,6 +1234,7 @@ mod tests {
             format: ModelFormat::default(),
             num_attention_heads: None,
             num_key_value_heads: None,
+            license: None,
         };
         let caps = Capability::infer(&model);
         assert!(caps.contains(&Capability::Vision));
@@ -1235,6 +1265,7 @@ mod tests {
             format: ModelFormat::default(),
             num_attention_heads: None,
             num_key_value_heads: None,
+            license: None,
         };
         let caps = Capability::infer(&model);
         assert!(caps.contains(&Capability::ToolUse));
@@ -1264,6 +1295,7 @@ mod tests {
             format: ModelFormat::default(),
             num_attention_heads: None,
             num_key_value_heads: None,
+            license: None,
         };
         let caps = Capability::infer(&model);
         assert!(caps.is_empty());
@@ -1292,6 +1324,7 @@ mod tests {
             format: ModelFormat::default(),
             num_attention_heads: None,
             num_key_value_heads: None,
+            license: None,
         };
         let caps = Capability::infer(&model);
         // Should keep the explicit Vision and not duplicate it
@@ -1454,6 +1487,7 @@ mod tests {
             format: ModelFormat::default(),
             num_attention_heads: attn_heads,
             num_key_value_heads: kv_heads,
+            license: None,
         }
     }
 

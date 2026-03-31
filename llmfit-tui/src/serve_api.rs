@@ -45,6 +45,7 @@ struct ModelsQuery {
     include_too_tight: Option<bool>,
     max_context: Option<u32>,
     force_runtime: Option<String>,
+    license: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -376,6 +377,10 @@ fn filtered_fits(
 
     if let Some(use_case) = use_case_filter {
         fits.retain(|f| f.use_case == use_case);
+    }
+
+    if let Some(ref lic_str) = query.license {
+        fits.retain(|f| llmfit_core::models::matches_license_filter(&f.model.license, lic_str));
     }
 
     let include_too_tight = query.include_too_tight.unwrap_or(!top_only);

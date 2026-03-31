@@ -160,6 +160,11 @@ pub fn display_model_detail(fit: &ModelFit) {
         println!("{}: {}", "Released".bold(), date);
     }
     println!(
+        "{}: {}",
+        "License".bold(),
+        fit.model.license.as_deref().unwrap_or("Unknown")
+    );
+    println!(
         "{}: {} (baseline est. ~{:.1} tok/s)",
         "Runtime".bold(),
         fit.runtime_text(),
@@ -534,6 +539,7 @@ fn fit_to_json(fit: &ModelFit) -> serde_json::Value {
         "use_case": fit.model.use_case,
         "category": fit.use_case.label(),
         "release_date": fit.model.release_date,
+        "license": fit.model.license,
         "is_moe": fit.model.is_moe,
         "fit_level": fit.fit_text(),
         "run_mode": fit.run_mode_text(),

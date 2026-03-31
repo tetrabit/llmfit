@@ -1072,6 +1072,7 @@ mod tests {
             format: models::ModelFormat::default(),
             num_attention_heads: None,
             num_key_value_heads: None,
+            license: None,
         }
     }
 
@@ -1252,6 +1253,7 @@ mod tests {
             format: models::ModelFormat::default(),
             num_attention_heads: None,
             num_key_value_heads: None,
+            license: None,
         };
         let mut system = test_system(64.0, true, Some(8.0));
         system.backend = GpuBackend::Cuda;
@@ -1287,6 +1289,7 @@ mod tests {
             format: models::ModelFormat::default(),
             num_attention_heads: None,
             num_key_value_heads: None,
+            license: None,
         };
         let system = test_system(12.0, true, Some(8.0));
 
