@@ -1,9 +1,9 @@
 use colored::*;
 use llmfit_core::fit::{FitLevel, ModelFit, SortColumn};
 use llmfit_core::hardware::SystemSpecs;
-use llmfit_core::models::{LlmModel, format_context_length};
+use llmfit_core::models::{format_context_length, LlmModel};
 use llmfit_core::plan::PlanEstimate;
-use tabled::{Table, Tabled, settings::Style};
+use tabled::{settings::Style, Table, Tabled};
 
 #[derive(Tabled)]
 struct ModelRow {
@@ -52,7 +52,10 @@ pub fn display_all_models(models: &[LlmModel], sort: SortColumn) {
             });
         }
         SortColumn::Ctx => {
-            models.sort_by(|a, b| b.context_length.cmp(&a.context_length));
+            models.sort_by(|a, b| {
+                b.effective_context_length()
+                    .cmp(&a.effective_context_length())
+            });
         }
         SortColumn::MemPct => {
             models.sort_by(|a, b| {
@@ -85,7 +88,7 @@ pub fn display_all_models(models: &[LlmModel], sort: SortColumn) {
             runtime: "-".to_string(),
             mode: "-".to_string(),
             mem_use: "-".to_string(),
-            context: format_context_length(m.context_length),
+            context: format_context_length(m.effective_context_length()),
             release_date: m
                 .release_date
                 .clone()
@@ -125,7 +128,7 @@ pub fn display_model_fits(fits: &[ModelFit]) {
                 runtime: fit.runtime_text().to_string(),
                 mode: fit.run_mode_text().to_string(),
                 mem_use: format!("{:.1}%", fit.utilization_pct),
-                context: format_context_length(fit.model.context_length),
+                context: format_context_length(fit.model.effective_context_length()),
                 release_date: fit
                     .model
                     .release_date
@@ -152,9 +155,9 @@ pub fn display_model_detail(fit: &ModelFit) {
     println!(
         "{}: {} tokens",
         "Context Length".bold(),
-        fit.model.context_length
+        fit.model.effective_context_length()
     );
-    println!("{}: {}", "Use Case".bold(), fit.model.use_case);
+    println!("{}: {}", "Use Case".bold(), fit.model.effective_use_case());
     println!("{}: {}", "Category".bold(), fit.use_case.label());
     if let Some(ref date) = fit.model.release_date {
         println!("{}: {}", "Released".bold(), date);
@@ -361,7 +364,7 @@ pub fn display_model_diff(fits: &[ModelFit], sort_label: &str) {
     print_metric_row(
         "Context",
         fits.iter()
-            .map(|f| format!("{} tokens", f.model.context_length))
+            .map(|f| format!("{} tokens", f.model.effective_context_length()))
             .collect(),
         metric_width,
         col_width,
@@ -437,7 +440,7 @@ pub fn display_search_results(models: &[&LlmModel], query: &str) {
             runtime: "-".to_string(),
             mode: "-".to_string(),
             mem_use: "-".to_string(),
-            context: format_context_length(m.context_length),
+            context: format_context_length(m.effective_context_length()),
             release_date: m
                 .release_date
                 .clone()
@@ -525,14 +528,24 @@ fn system_json(specs: &SystemSpecs) -> serde_json::Value {
 }
 
 fn fit_to_json(fit: &ModelFit) -> serde_json::Value {
+    let context_length = fit.model.effective_context_length();
+    let use_case = fit.model.effective_use_case();
+    let capabilities = fit
+        .model
+        .effective_capabilities()
+        .into_iter()
+        .map(|cap| cap.label())
+        .collect::<Vec<_>>();
     serde_json::json!({
         "name": fit.model.name,
         "provider": fit.model.provider,
         "parameter_count": fit.model.parameter_count,
         "params_b": round2(fit.model.params_b()),
-        "context_length": fit.model.context_length,
-        "use_case": fit.model.use_case,
+        "context_length": context_length,
+        "use_case": use_case,
         "category": fit.use_case.label(),
+        "capabilities": capabilities,
+        "metadata_source": fit.model.metadata_source(),
         "release_date": fit.model.release_date,
         "is_moe": fit.model.is_moe,
         "fit_level": fit.fit_text(),

@@ -64,6 +64,10 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) {
         KeyCode::Home | KeyCode::Char('g') => app.home(),
         KeyCode::End | KeyCode::Char('G') => app.end(),
 
+        KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.reset_filters()
+        }
+
         // Visual mode
         KeyCode::Char('v') => app.enter_visual_mode(),
 
@@ -100,6 +104,7 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) {
         KeyCode::Char('P') => app.open_provider_popup(),
         KeyCode::Char('U') => app.open_use_case_popup(),
         KeyCode::Char('C') => app.open_capability_popup(),
+        KeyCode::Char('Q') => app.open_quant_popup(),
 
         // Installed-first sort toggle (any provider)
         KeyCode::Char('i')
@@ -131,10 +136,6 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) {
                 || app.lmstudio_available =>
         {
             app.refresh_installed()
-        }
-
-        KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.reset_filters()
         }
 
         // Refresh online model metadata and discover new trending models
@@ -294,7 +295,7 @@ fn handle_download_provider_popup_mode(app: &mut App, key: KeyEvent) {
 
 fn handle_quant_popup_mode(app: &mut App, key: KeyEvent) {
     match key.code {
-        KeyCode::Esc | KeyCode::Char('q') => app.close_quant_popup(),
+        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('Q') => app.close_quant_popup(),
 
         KeyCode::Up | KeyCode::Char('k') => app.quant_popup_up(),
         KeyCode::Down | KeyCode::Char('j') => app.quant_popup_down(),
@@ -334,5 +335,63 @@ fn handle_params_bucket_popup_mode(app: &mut App, key: KeyEvent) {
         KeyCode::Char('a') => app.params_bucket_popup_select_all(),
 
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::handle_normal_mode;
+    use crate::tui_app::{AvailabilityFilter, ContextFilter, FitFilter, RuntimeFilter, TpFilter};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use llmfit_core::{fit::SortColumn, hardware::{GpuBackend, SystemSpecs}};
+
+    #[test]
+    fn ctrl_r_resets_filters_even_when_runtime_is_available() {
+        let mut app = crate::tui_app::App::with_specs_and_context(
+            SystemSpecs {
+                total_ram_gb: 64.0,
+                available_ram_gb: 48.0,
+                total_cpu_cores: 16,
+                cpu_name: "Test CPU".to_string(),
+                has_gpu: true,
+                gpu_vram_gb: Some(24.0),
+                total_gpu_vram_gb: Some(24.0),
+                gpu_name: Some("RTX 4090".to_string()),
+                gpu_count: 1,
+                unified_memory: false,
+                backend: GpuBackend::Cuda,
+                gpus: vec![],
+                cluster_mode: false,
+                cluster_node_count: 0,
+            },
+            None,
+        );
+        app.search_query = "nemotron".to_string();
+        app.cursor_position = app.search_query.len();
+        app.fit_filter = FitFilter::Runnable;
+        app.runtime_filter = RuntimeFilter::LmStudio;
+        app.availability_filter = AvailabilityFilter::Installed;
+        app.tp_filter = TpFilter::Tp4;
+        app.context_filter = ContextFilter::AtLeast128k;
+        app.installed_first = true;
+        app.sort_column = SortColumn::Params;
+        app.sort_ascending = true;
+        app.lmstudio_available = true;
+
+        handle_normal_mode(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL),
+        );
+
+        assert_eq!(app.fit_filter, FitFilter::All);
+        assert_eq!(app.runtime_filter, RuntimeFilter::Any);
+        assert_eq!(app.availability_filter, AvailabilityFilter::All);
+        assert_eq!(app.tp_filter, TpFilter::All);
+        assert_eq!(app.context_filter, ContextFilter::All);
+        assert!(!app.installed_first);
+        assert_eq!(app.sort_column, SortColumn::Score);
+        assert!(!app.sort_ascending);
+        assert!(app.search_query.is_empty());
+        assert_eq!(app.pull_status.as_deref(), Some("Reset all filters"));
     }
 }

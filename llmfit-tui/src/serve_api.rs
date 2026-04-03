@@ -349,22 +349,20 @@ fn filtered_fits(
         let search_lower = search.to_lowercase();
         let terms: Vec<&str> = search_lower.split_whitespace().collect();
         fits.retain(|f| {
+            let effective_context_length = f.model.effective_context_length();
             let searchable = format!(
                 "{} {} {} {} {} {} {}",
                 f.model.name.to_lowercase(),
                 f.model.provider.to_lowercase(),
                 f.model.parameter_count.to_lowercase(),
-                f.model.use_case.to_lowercase(),
+                f.model.effective_use_case().to_lowercase(),
                 f.use_case.label().to_lowercase(),
-                f.model.context_length,
-                llmfit_core::models::format_context_length(f.model.context_length).to_lowercase(),
+                effective_context_length,
+                llmfit_core::models::format_context_length(effective_context_length).to_lowercase(),
             );
             terms.iter().all(|term| {
                 searchable.contains(term)
-                    || llmfit_core::models::context_matches_search_term(
-                        term,
-                        f.model.context_length,
-                    )
+                    || llmfit_core::models::context_matches_search_term(term, effective_context_length)
             })
         });
     }
@@ -588,14 +586,24 @@ fn system_json(specs: &SystemSpecs) -> serde_json::Value {
 }
 
 fn fit_to_json(fit: &ModelFit) -> serde_json::Value {
+    let context_length = fit.model.effective_context_length();
+    let use_case = fit.model.effective_use_case();
+    let capabilities = fit
+        .model
+        .effective_capabilities()
+        .into_iter()
+        .map(|cap| cap.label())
+        .collect::<Vec<_>>();
     serde_json::json!({
         "name": fit.model.name,
         "provider": fit.model.provider,
         "parameter_count": fit.model.parameter_count,
         "params_b": round2(fit.model.params_b()),
-        "context_length": fit.model.context_length,
-        "use_case": fit.model.use_case,
+        "context_length": context_length,
+        "use_case": use_case,
         "category": fit.use_case.label(),
+        "capabilities": capabilities,
+        "metadata_source": fit.model.metadata_source(),
         "release_date": fit.model.release_date,
         "is_moe": fit.model.is_moe,
         "fit_level": fit_level_code(fit.fit_level),

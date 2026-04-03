@@ -1932,6 +1932,7 @@ mod tests {
                 format: llmfit_core::models::ModelFormat::default(),
                 num_attention_heads: None,
                 num_key_value_heads: None,
+                metadata_overlay: None,
             },
             fit_level,
             run_mode: RunMode::Gpu,
@@ -2007,6 +2008,7 @@ mod tests {
                 format: llmfit_core::models::ModelFormat::default(),
                 num_attention_heads: None,
                 num_key_value_heads: None,
+                metadata_overlay: None,
             },
             LlmModel {
                 name: "Qwen/Qwen3-Coder-Next".to_string(),
@@ -2029,6 +2031,7 @@ mod tests {
                 format: llmfit_core::models::ModelFormat::default(),
                 num_attention_heads: None,
                 num_key_value_heads: None,
+                metadata_overlay: None,
             },
         ];
 

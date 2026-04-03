@@ -13,9 +13,10 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
-use crate::models::{LlmModel, ModelFormat};
+use crate::models::{Capability, LlmModel, MetadataSource, ModelFormat, ModelMetadataOverlay};
 
 const HF_API: &str = "https://huggingface.co/api/models";
+const LMSTUDIO_MODELS_URL: &str = "https://lmstudio.ai/models";
 
 /// Bump this when the `LlmModel` schema changes in a breaking way.
 /// A cache written by an older version will be discarded and re-fetched.
@@ -27,6 +28,33 @@ const CACHE_VERSION: u32 = 1;
 struct CacheEnvelope {
     version: u32,
     models: Vec<LlmModel>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct OverlayCacheEnvelope {
+    version: u32,
+    overlays: HashMap<String, ModelMetadataOverlay>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LmStudioModelPageMetadata {
+    model_key: String,
+    context_length: Option<u32>,
+    capabilities: Vec<Capability>,
+    parameter_count: Option<String>,
+    artifact_name: Option<String>,
+    notes: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct LmStudioCatalogEntry {
+    model_key: String,
+    memory_gb: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct LmStudioCatalogFamilyPage {
+    concrete_models: Vec<LmStudioCatalogEntry>,
 }
 
 /// Returns the llmfit data directory.
@@ -52,6 +80,10 @@ pub fn cache_file() -> Option<PathBuf> {
     Some(cache_dir()?.join("hf_models_cache.json"))
 }
 
+pub fn lmstudio_metadata_cache_file() -> Option<PathBuf> {
+    Some(cache_dir()?.join("lmstudio_metadata_cache.json"))
+}
+
 /// Load any previously cached models.
 ///
 /// Returns an empty vec if the cache is missing, corrupt, or was written by
@@ -71,6 +103,20 @@ pub fn load_cache() -> Vec<LlmModel> {
     }
 }
 
+pub fn load_lmstudio_metadata_cache() -> HashMap<String, ModelMetadataOverlay> {
+    let path = match lmstudio_metadata_cache_file() {
+        Some(p) if p.exists() => p,
+        _ => return HashMap::new(),
+    };
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return HashMap::new();
+    };
+    match serde_json::from_str::<OverlayCacheEnvelope>(&content) {
+        Ok(env) if env.version == CACHE_VERSION => env.overlays,
+        _ => HashMap::new(),
+    }
+}
+
 /// Persist a model list to the cache file, creating the directory if needed.
 pub fn save_cache(models: &[LlmModel]) -> Result<(), String> {
     let path = cache_file().ok_or_else(|| "Cannot determine cache directory".to_string())?;
@@ -87,6 +133,24 @@ pub fn save_cache(models: &[LlmModel]) -> Result<(), String> {
     Ok(())
 }
 
+pub fn save_lmstudio_metadata_cache(
+    overlays: &HashMap<String, ModelMetadataOverlay>,
+) -> Result<(), String> {
+    let path = lmstudio_metadata_cache_file()
+        .ok_or_else(|| "Cannot determine cache directory".to_string())?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("Failed to create cache dir: {e}"))?;
+    }
+    let envelope = OverlayCacheEnvelope {
+        version: CACHE_VERSION,
+        overlays: overlays.clone(),
+    };
+    let json = serde_json::to_string_pretty(&envelope)
+        .map_err(|e| format!("Serialize error: {e}"))?;
+    std::fs::write(&path, json).map_err(|e| format!("Failed to write cache: {e}"))?;
+    Ok(())
+}
+
 /// Delete the cache file.  Returns the number of models that were removed.
 pub fn clear_cache() -> Result<usize, String> {
     let path = match cache_file() {
@@ -94,6 +158,16 @@ pub fn clear_cache() -> Result<usize, String> {
         _ => return Ok(0),
     };
     let count = load_cache().len();
+    std::fs::remove_file(&path).map_err(|e| format!("Failed to delete cache: {e}"))?;
+    Ok(count)
+}
+
+pub fn clear_lmstudio_metadata_cache() -> Result<usize, String> {
+    let path = match lmstudio_metadata_cache_file() {
+        Some(p) if p.exists() => p,
+        _ => return Ok(0),
+    };
+    let count = load_lmstudio_metadata_cache().len();
     std::fs::remove_file(&path).map_err(|e| format!("Failed to delete cache: {e}"))?;
     Ok(count)
 }
@@ -470,6 +544,560 @@ fn fetch_precise_context_length(repo_id: &str, token: Option<&str>) -> Option<u3
     fetch_config_json(repo_id, token).and_then(|config| exact_context_length(repo_id, &config))
 }
 
+fn lmstudio_get(url: &str) -> Result<String, String> {
+    ureq::get(url)
+        .header("User-Agent", "Mozilla/5.0")
+        .config()
+        .timeout_global(Some(std::time::Duration::from_secs(30)))
+        .build()
+        .call()
+        .map_err(|e| format!("LM Studio request failed for {url}: {e}"))?
+        .into_body()
+        .read_to_string()
+        .map_err(|e| format!("Failed to read LM Studio response for {url}: {e}"))
+}
+
+fn lmstudio_model_url(model_key: &str) -> String {
+    format!("{}/{}", LMSTUDIO_MODELS_URL, model_key)
+}
+
+fn decode_html_text(input: &str) -> String {
+    input
+        .replace("\\u003c", "<")
+        .replace("\\u003e", ">")
+        .replace("\\u0026", "&")
+        .replace("\\\"", "\"")
+        .replace("&quot;", "\"")
+        .replace("&#x27;", "'")
+        .replace("&amp;", "&")
+}
+
+fn strip_html_tags(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut in_tag = false;
+    for ch in input.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => out.push(ch),
+            _ => {}
+        }
+    }
+    out
+}
+
+fn normalize_space(input: &str) -> String {
+    input.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn parse_lmstudio_catalog_index(html: &str) -> Vec<String> {
+    let mut slugs = Vec::new();
+    let marker = "href=\"/models/";
+    let mut start = 0;
+
+    while let Some(idx) = html[start..].find(marker) {
+        let href_start = start + idx + marker.len();
+        let Some(end_rel) = html[href_start..].find('"') else {
+            break;
+        };
+        let slug = &html[href_start..href_start + end_rel];
+        start = href_start + end_rel;
+
+        if slug.is_empty() || slug.contains('/') {
+            continue;
+        }
+        if !slugs.iter().any(|existing| existing == slug) {
+            slugs.push(slug.to_string());
+        }
+    }
+
+    slugs
+}
+
+fn parse_lmstudio_family_page(html: &str) -> LmStudioCatalogFamilyPage {
+    let mut concrete_models = Vec::new();
+    let mut seen = HashSet::new();
+
+    if let Some(keywords_start) = html.find("\"keywords\":[") {
+        let tail = &html[keywords_start + "\"keywords\": [".len() - 1..];
+        if let Some(end_rel) = tail.find(']') {
+            let keywords_block = &tail[..end_rel];
+            for keyword in keywords_block.split(',') {
+                let keyword = keyword.trim().trim_matches('"');
+                if let Some((owner, model)) = keyword.split_once('/')
+                    && !owner.is_empty()
+                    && !model.is_empty()
+                    && !model.contains(' ')
+                    && seen.insert(keyword.to_string())
+                {
+                    concrete_models.push(LmStudioCatalogEntry {
+                        model_key: keyword.to_string(),
+                        memory_gb: None,
+                    });
+                }
+            }
+        }
+    }
+
+    let marker = "href=\"/models/";
+    let mut start = 0;
+
+    while let Some(idx) = html[start..].find(marker) {
+        let href_start = start + idx + marker.len();
+        let Some(end_rel) = html[href_start..].find('"') else {
+            break;
+        };
+        let slug = &html[href_start..href_start + end_rel];
+        start = href_start + end_rel;
+
+        let Some((owner, model)) = slug.split_once('/') else {
+            continue;
+        };
+        if owner.is_empty() || model.is_empty() {
+            continue;
+        }
+
+        let window_end = (start + 400).min(html.len());
+        let window = &html[start..window_end];
+        let memory_gb = extract_first_memory_gb(window);
+        let model_key = format!("{owner}/{model}");
+
+        if seen.insert(model_key.clone()) {
+            concrete_models.push(LmStudioCatalogEntry {
+                model_key,
+                memory_gb,
+            });
+        }
+    }
+
+    LmStudioCatalogFamilyPage { concrete_models }
+}
+
+fn extract_first_memory_gb(input: &str) -> Option<f64> {
+    let mut digits = String::new();
+    let mut seen_digit = false;
+
+    for ch in input.chars() {
+        if ch.is_ascii_digit() {
+            digits.push(ch);
+            seen_digit = true;
+        } else if ch == '.' && seen_digit && !digits.contains('.') {
+            digits.push(ch);
+        } else if seen_digit {
+            let rest = &input[input.find(&digits)? + digits.len()..];
+            if rest.trim_start().starts_with("GB") {
+                return digits.parse::<f64>().ok();
+            }
+            digits.clear();
+            seen_digit = false;
+        }
+    }
+
+    None
+}
+
+fn parse_lmstudio_model_page(html: &str) -> Option<LmStudioModelPageMetadata> {
+    if let Some(parsed) = parse_lmstudio_model_page_from_yaml(html) {
+        return Some(parsed);
+    }
+    parse_lmstudio_model_page_from_content(html)
+}
+
+fn parse_lmstudio_model_page_from_yaml(html: &str) -> Option<LmStudioModelPageMetadata> {
+    let title_start = html.find("# model.yaml is an open standard")?;
+    let title_end = html[title_start..].find("</pre>").map(|idx| title_start + idx)?;
+    let block = decode_html_text(&html[title_start..title_end]);
+    let text = strip_html_tags(&block);
+    let lines = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .collect::<Vec<_>>();
+
+    let mut model_key = None;
+    let mut context_length = None;
+    let mut parameter_count = None;
+    let mut artifact_name = None;
+    let mut vision = None;
+    let mut tool_use = None;
+    let mut first_base_key = None;
+
+    for window in lines.windows(2) {
+        let line = window[0];
+        if let Some(value) = line.strip_prefix("model:") {
+            model_key = Some(value.trim().to_string());
+        } else if let Some(value) = line.strip_prefix("key:") {
+            let key = value.trim().to_string();
+            if first_base_key.is_none() && key.starts_with("lmstudio-community/") {
+                first_base_key = Some(key);
+            }
+        } else if let Some(value) = line.strip_prefix("repo:") {
+            if artifact_name.is_none() {
+                artifact_name = Some(value.trim().to_string());
+            }
+        } else if let Some(value) = line.strip_prefix("vision:") {
+            vision = Some(value.trim().eq_ignore_ascii_case("true"));
+        } else if let Some(value) = line.strip_prefix("trainedForToolUse:") {
+            tool_use = Some(value.trim().eq_ignore_ascii_case("true"));
+        } else if line.starts_with("paramsStrings:") {
+            let next = window[1].trim_start_matches('-').trim();
+            if !next.contains(':') {
+                parameter_count = Some(next.to_string());
+            }
+        } else if line.starts_with("contextLengths:") {
+            let next = window[1].trim_start_matches('-').trim();
+            if !next.contains(':') {
+                context_length = next.parse::<u32>().ok();
+            }
+        }
+    }
+
+    if let Some(last_line) = lines.last()
+        && let Some(value) = last_line.strip_prefix("trainedForToolUse:")
+    {
+        tool_use = Some(value.trim().eq_ignore_ascii_case("true"));
+    }
+
+    let model_key = model_key?;
+    let mut capabilities = Vec::new();
+    if vision.unwrap_or(false) {
+        capabilities.push(Capability::Vision);
+    }
+    if tool_use.unwrap_or(false) {
+        capabilities.push(Capability::ToolUse);
+    }
+
+    Some(LmStudioModelPageMetadata {
+        model_key,
+        context_length,
+        capabilities,
+        parameter_count,
+        artifact_name: artifact_name.or(first_base_key),
+        notes: Some("LM Studio catalog metadata".to_string()),
+    })
+}
+
+fn parse_lmstudio_model_page_from_content(html: &str) -> Option<LmStudioModelPageMetadata> {
+    let decoded = decode_html_text(html);
+    let text = normalize_space(&strip_html_tags(&decoded));
+
+    let model_key = extract_model_key_from_page(&decoded, &text)?;
+    let artifact_name = extract_lmstudio_artifact_repo(&decoded);
+    let context_length = extract_context_length_from_text(&text);
+    let parameter_count = extract_parameter_count_from_text(&text);
+
+    let lower = text.to_lowercase();
+    let mut capabilities = Vec::new();
+    if lower.contains("tool use")
+        || lower.contains("tool calling")
+        || lower.contains("function calling")
+        || lower.contains("agentic")
+        || lower.contains("web browsing")
+        || lower.contains("python execution")
+    {
+        capabilities.push(Capability::ToolUse);
+    }
+    if lower.contains("vision") || lower.contains("multimodal") {
+        capabilities.push(Capability::Vision);
+    }
+
+    Some(LmStudioModelPageMetadata {
+        model_key,
+        context_length,
+        capabilities,
+        parameter_count,
+        artifact_name,
+        notes: Some("LM Studio catalog metadata".to_string()),
+    })
+}
+
+fn extract_model_key_from_page(decoded_html: &str, text: &str) -> Option<String> {
+    if let Some(pos) = decoded_html.find("\"keywords\":[") {
+        let tail = &decoded_html[pos..];
+        if let Some(end) = tail.find(']') {
+            let block = &tail[..end];
+            for keyword in block.split(',') {
+                let keyword = keyword.trim().trim_matches('"');
+                if let Some((owner, model)) = keyword.split_once('/')
+                    && !owner.is_empty()
+                    && !model.is_empty()
+                    && !model.contains(' ')
+                    && !model.chars().any(|ch| ch.is_uppercase())
+                {
+                    return Some(keyword.to_string());
+                }
+            }
+        }
+    }
+
+    let marker = "← All Models";
+    if let Some(idx) = text.find(marker) {
+        let after = text[idx + marker.len()..].trim_start();
+        let first = after.split_whitespace().next()?;
+        if first.contains('/') {
+            return Some(first.to_string());
+        }
+    }
+
+    None
+}
+
+fn extract_lmstudio_artifact_repo(decoded_html: &str) -> Option<String> {
+    let marker = "huggingface.co/lmstudio-community/";
+    let start = decoded_html.find(marker)? + "huggingface.co/".len();
+    let tail = &decoded_html[start..];
+    let end = tail
+        .find(|c: char| c == '"' || c == '<' || c == '>' || c.is_whitespace())
+        .unwrap_or(tail.len());
+    Some(tail[..end].trim_end_matches('/').to_string())
+}
+
+fn extract_context_length_from_text(text: &str) -> Option<u32> {
+    let lower = text.to_lowercase();
+    if lower.contains("1m tokens") || lower.contains("1 million tokens") {
+        return Some(1_048_576);
+    }
+    if lower.contains("256k") {
+        return Some(262_144);
+    }
+    if lower.contains("131k") || lower.contains("128k") {
+        return Some(131_072);
+    }
+    None
+}
+
+fn extract_parameter_count_from_text(text: &str) -> Option<String> {
+    let words = text.split_whitespace().collect::<Vec<_>>();
+    for idx in 0..words.len() {
+        let token = words[idx].trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '.');
+        if !(token.ends_with('B') || token.ends_with('M')) {
+            continue;
+        }
+        let prefix = &token[..token.len().saturating_sub(1)];
+        if !(prefix.chars().all(|ch| ch.is_ascii_digit() || ch == '.') && !prefix.is_empty()) {
+            continue;
+        }
+
+        let next = words
+            .get(idx + 1)
+            .map(|w| w.trim_matches(|c: char| !c.is_ascii_alphabetic()))
+            .unwrap_or("")
+            .to_lowercase();
+        let prev = words
+            .get(idx.saturating_sub(1))
+            .map(|w| w.trim_matches(|c: char| !c.is_ascii_alphabetic()))
+            .unwrap_or("")
+            .to_lowercase();
+
+        if matches!(next.as_str(), "total" | "parameters" | "parameter")
+            || matches!(prev.as_str(), "with" | "contains" | "has")
+        {
+            return Some(token.to_string());
+        }
+    }
+
+    for token in &words {
+        let token = token.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '.');
+        if token.ends_with('B') {
+            let prefix = &token[..token.len().saturating_sub(1)];
+            if prefix.chars().all(|ch| ch.is_ascii_digit() || ch == '.') && !prefix.is_empty() {
+                return Some(token.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn fetch_lmstudio_model_page(model_key: &str) -> Result<Option<LmStudioModelPageMetadata>, String> {
+    let html = lmstudio_get(&lmstudio_model_url(model_key))?;
+    Ok(parse_lmstudio_model_page(&html))
+}
+
+fn fetch_lmstudio_overlay_for_model(model_key: &str) -> Result<Option<ModelMetadataOverlay>, String> {
+    let Some(page) = fetch_lmstudio_model_page(model_key)? else {
+        return Ok(None);
+    };
+
+    let use_case = if page.capabilities.contains(&Capability::ToolUse) {
+        Some("Agentic & tool use".to_string())
+    } else {
+        None
+    };
+
+    Ok(Some(ModelMetadataOverlay {
+        source: MetadataSource::LmStudioCatalog,
+        context_length: page.context_length,
+        capabilities: if page.capabilities.is_empty() {
+            None
+        } else {
+            Some(page.capabilities)
+        },
+        use_case,
+        artifact_name: page.artifact_name,
+        notes: page.notes,
+    }))
+}
+
+fn resolve_lmstudio_overlay_for_model(repo_id: &str) -> Result<Option<ModelMetadataOverlay>, String> {
+    let candidates = crate::providers::hf_name_to_lmstudio_candidates(repo_id);
+    let mut last_error = None;
+
+    for candidate in candidates {
+        match fetch_lmstudio_overlay_for_model(&candidate) {
+            Ok(Some(overlay)) => return Ok(Some(overlay)),
+            Ok(None) => {}
+            Err(err) => {
+                if !err.contains("404") {
+                    last_error = Some(err);
+                }
+            }
+        }
+    }
+
+    if let Some(err) = last_error {
+        Err(err)
+    } else {
+        Ok(None)
+    }
+}
+
+fn build_lmstudio_catalog_model(
+    model_key: &str,
+    page: &LmStudioModelPageMetadata,
+    memory_gb_hint: Option<f64>,
+) -> Option<LlmModel> {
+    let parameter_count = page.parameter_count.clone().unwrap_or_else(|| "Unknown".to_string());
+    let (parsed_label, params_raw, is_moe, num_experts, active_experts, active_parameters) =
+        extract_model_params(model_key);
+    let params_raw = params_raw.or_else(|| page.parameter_count.as_deref().and_then(parse_param_str));
+    let parameter_count = if page.parameter_count.is_some() {
+        parameter_count
+    } else {
+        parsed_label
+    };
+
+    let raw = params_raw?;
+    let context_length = page
+        .context_length
+        .unwrap_or_else(|| infer_context_length(model_key, params_raw));
+    let use_case = if page.capabilities.contains(&Capability::ToolUse) {
+        "Agentic & tool use".to_string()
+    } else if page.capabilities.contains(&Capability::Vision) {
+        "Vision & Language".to_string()
+    } else {
+        infer_use_case(model_key, &[])
+    };
+
+    let (mut min_ram_gb, mut recommended_ram_gb, min_vram_gb) =
+        estimate_ram(raw, is_moe, active_parameters);
+    if let Some(memory_gb) = memory_gb_hint {
+        min_ram_gb = min_ram_gb.max(memory_gb);
+        recommended_ram_gb = recommended_ram_gb.max(memory_gb);
+    }
+
+    let provider = model_key
+        .split('/')
+        .next()
+        .unwrap_or("LM Studio")
+        .to_string();
+    let artifact_name = page.artifact_name.clone().unwrap_or_else(|| model_key.to_string());
+
+    Some(LlmModel {
+        name: model_key.to_string(),
+        provider,
+        parameter_count,
+        parameters_raw: params_raw,
+        min_ram_gb,
+        recommended_ram_gb,
+        min_vram_gb,
+        quantization: "Q4_K_M".to_string(),
+        context_length,
+        use_case,
+        is_moe,
+        num_experts,
+        active_experts,
+        active_parameters,
+        release_date: None,
+        gguf_sources: vec![crate::models::GgufSource {
+            repo: artifact_name.clone(),
+            provider: artifact_name
+                .split('/')
+                .next()
+                .unwrap_or("lmstudio-community")
+                .to_string(),
+        }],
+        capabilities: page.capabilities.clone(),
+        format: ModelFormat::Gguf,
+        num_attention_heads: None,
+        num_key_value_heads: None,
+        metadata_overlay: Some(ModelMetadataOverlay {
+            source: MetadataSource::LmStudioCatalog,
+            context_length: page.context_length,
+            capabilities: (!page.capabilities.is_empty()).then_some(page.capabilities.clone()),
+            use_case: Some(if page.capabilities.contains(&Capability::ToolUse) {
+                "Agentic & tool use".to_string()
+            } else if page.capabilities.contains(&Capability::Vision) {
+                "Vision & Language".to_string()
+            } else {
+                infer_use_case(model_key, &[])
+            }),
+            artifact_name: page.artifact_name.clone(),
+            notes: page.notes.clone(),
+        }),
+    })
+}
+
+fn fetch_lmstudio_catalog_models(progress: impl Fn(&str)) -> Result<Vec<LlmModel>, String> {
+    let index_html = lmstudio_get(LMSTUDIO_MODELS_URL)?;
+    let family_slugs = parse_lmstudio_catalog_index(&index_html);
+    let mut models = Vec::new();
+    let mut seen = HashSet::new();
+
+    for (family_idx, family_slug) in family_slugs.iter().enumerate() {
+        let family_html = match lmstudio_get(&lmstudio_model_url(family_slug)) {
+            Ok(html) => html,
+            Err(err) => {
+                progress(&format!("  Warning: LM Studio family fetch failed for {family_slug} — {err}"));
+                continue;
+            }
+        };
+        let family_page = parse_lmstudio_family_page(&family_html);
+
+        for entry in family_page.concrete_models {
+            if !seen.insert(entry.model_key.clone()) {
+                continue;
+            }
+
+            match fetch_lmstudio_model_page(&entry.model_key) {
+                Ok(Some(page)) => {
+                    if let Some(model) = build_lmstudio_catalog_model(
+                        &entry.model_key,
+                        &page,
+                        entry.memory_gb,
+                    ) {
+                        models.push(model);
+                    }
+                }
+                Ok(None) => {}
+                Err(err) => progress(&format!(
+                    "  Warning: LM Studio model fetch failed for {} — {}",
+                    entry.model_key, err
+                )),
+            }
+        }
+
+        if (family_idx + 1) % 10 == 0 || family_idx + 1 == family_slugs.len() {
+            progress(&format!(
+                "  Crawled {}/{} LM Studio catalog families",
+                family_idx + 1,
+                family_slugs.len()
+            ));
+        }
+    }
+
+    Ok(models)
+}
+
 /// Convert a raw HF API entry into an `LlmModel`.
 /// Returns `None` for models that cannot be characterised as text-generation.
 fn map_to_llm_model(hf: HfApiModel, precise_context_length: Option<u32>) -> Option<LlmModel> {
@@ -552,6 +1180,7 @@ fn map_to_llm_model(hf: HfApiModel, precise_context_length: Option<u32>) -> Opti
         format: ModelFormat::default(),
         num_attention_heads: None,
         num_key_value_heads: None,
+        metadata_overlay: None,
     })
 }
 
@@ -621,6 +1250,7 @@ pub fn update_model_cache(
         .into_iter()
         .map(|m| (crate::models::canonical_slug(&m.name), m))
         .collect();
+    let mut lmstudio_overlays = load_lmstudio_metadata_cache();
 
     let token = opts.token.as_deref();
     let mut all_hf: Vec<HfApiModel> = Vec::new();
@@ -665,6 +1295,18 @@ pub fn update_model_cache(
                 Err(e) => progress(&format!("  Warning: refresh failed for {repo_id} — {e}")),
             }
 
+            match resolve_lmstudio_overlay_for_model(repo_id) {
+                Ok(Some(overlay)) => {
+                    fetched_any = true;
+                    let slug = crate::models::canonical_slug(repo_id);
+                    if lmstudio_overlays.get(&slug) != Some(&overlay) {
+                        lmstudio_overlays.insert(slug, overlay);
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => progress(&format!("  Warning: LM Studio metadata failed for {repo_id} — {e}")),
+            }
+
             if (idx + 1) % 25 == 0 || idx + 1 == known_model_ids.len() {
                 progress(&format!(
                     "  Refreshed {}/{} known models",
@@ -705,6 +1347,25 @@ pub fn update_model_cache(
         }
     }
 
+    progress("Fetching LM Studio catalog models...");
+    match fetch_lmstudio_catalog_models(&progress) {
+        Ok(lmstudio_models) => {
+            if !lmstudio_models.is_empty() {
+                fetched_any = true;
+            }
+            progress(&format!(
+                "  Received {} LM Studio catalog models",
+                lmstudio_models.len()
+            ));
+            for model in lmstudio_models {
+                if upsert_cached_model(&mut cached_by_slug, model) {
+                    changed_count += 1;
+                }
+            }
+        }
+        Err(e) => progress(&format!("  Warning: LM Studio catalog fetch failed — {e}")),
+    }
+
     if !fetched_any {
         return Err("No models fetched — check your internet connection".to_string());
     }
@@ -732,6 +1393,7 @@ pub fn update_model_cache(
         total, changed_count
     ));
     save_cache(&cached)?;
+    save_lmstudio_metadata_cache(&lmstudio_overlays)?;
 
     Ok((changed_count, total))
 }
@@ -739,6 +1401,7 @@ pub fn update_model_cache(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::MetadataSource;
 
     #[test]
     fn test_parse_param_str_billions() {
@@ -848,5 +1511,281 @@ mod tests {
         let (_, _, vram_dense) = estimate_ram(56_000_000_000, false, None);
         // MoE VRAM should be substantially lower than dense equivalent
         assert!(vram_moe.unwrap() < vram_dense.unwrap());
+    }
+
+    #[test]
+    fn test_parse_lmstudio_model_page_nemotron_metadata() {
+        let html = r#"
+        <pre><code>
+        # model.yaml is an open standard for defining cross-platform, composable AI models
+        model: nvidia/nemotron-3-nano
+        base:
+          - key: lmstudio-community/nvidia-nemotron-3-nano-30b-a3b-gguf
+            sources:
+              - type: huggingface
+                user: lmstudio-community
+                repo: NVIDIA-Nemotron-3-Nano-30B-A3B-GGUF
+        metadataOverrides:
+          domain: llm
+          architectures:
+            - nemotron_h_moe
+          compatibilityTypes:
+            - gguf
+            - safetensors
+          paramsStrings:
+            - 30B
+          minMemoryUsageBytes: 24620000000
+          contextLengths:
+            - 1048576
+          vision: false
+          reasoning: true
+          trainedForToolUse: true
+        </code></pre>
+        "#;
+
+        let parsed = parse_lmstudio_model_page(html).expect("should parse lmstudio model page");
+
+        assert_eq!(parsed.model_key, "nvidia/nemotron-3-nano");
+        assert_eq!(parsed.context_length, Some(1_048_576));
+        assert_eq!(parsed.parameter_count.as_deref(), Some("30B"));
+        assert!(parsed.capabilities.contains(&Capability::ToolUse));
+        assert!(!parsed.capabilities.contains(&Capability::Vision));
+        assert_eq!(
+            parsed.artifact_name.as_deref(),
+            Some("NVIDIA-Nemotron-3-Nano-30B-A3B-GGUF")
+        );
+    }
+
+    #[test]
+    fn test_fetch_lmstudio_overlay_maps_metadata_to_overlay() {
+        let html = r#"
+        <pre><code>
+        # model.yaml is an open standard for defining cross-platform, composable AI models
+        model: nvidia/nemotron-3-nano
+        metadataOverrides:
+          compatibilityTypes:
+            - gguf
+          paramsStrings:
+            - 30B
+          contextLengths:
+            - 1048576
+          vision: false
+          trainedForToolUse: true
+        </code></pre>
+        "#;
+
+        let parsed = parse_lmstudio_model_page(html).expect("should parse model yaml block");
+        let overlay = ModelMetadataOverlay {
+            source: MetadataSource::LmStudioCatalog,
+            context_length: parsed.context_length,
+            capabilities: Some(parsed.capabilities),
+            use_case: Some("Agentic & tool use".to_string()),
+            artifact_name: parsed.artifact_name,
+            notes: parsed.notes,
+        };
+
+        assert_eq!(overlay.source, MetadataSource::LmStudioCatalog);
+        assert_eq!(overlay.context_length, Some(1_048_576));
+        assert_eq!(overlay.use_case.as_deref(), Some("Agentic & tool use"));
+        assert!(overlay
+            .capabilities
+            .as_ref()
+            .expect("caps present")
+            .contains(&Capability::ToolUse));
+    }
+
+    #[test]
+    fn test_lmstudio_candidate_mapping_includes_nemotron_public_slug() {
+        let candidates = crate::providers::hf_name_to_lmstudio_candidates(
+            "stelterlab/NVIDIA-Nemotron-3-Nano-30B-A3B-AWQ",
+        );
+
+        assert!(candidates.contains(&"nvidia/nemotron-3-nano".to_string()));
+    }
+
+    #[test]
+    fn test_parse_lmstudio_catalog_index_extracts_family_slugs() {
+        let html = r#"
+        <a href="/models/qwen3">Qwen3</a>
+        <a href="/models/nemotron-3">Nemotron 3</a>
+        <a href="/models/qwen/qwen3-4b-2507">Concrete</a>
+        "#;
+
+        assert_eq!(
+            parse_lmstudio_catalog_index(html),
+            vec!["qwen3".to_string(), "nemotron-3".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_parse_lmstudio_family_page_extracts_concrete_models() {
+        let html = r#"
+        <a href="/models/qwen/qwen3-coder-30b">qwen/qwen3-coder-30b</a>
+        <div>15.00 GB</div>
+        <a href="/models/openai/gpt-oss-20b">openai/gpt-oss-20b</a>
+        <div>12.00 GB</div>
+        "#;
+
+        let parsed = parse_lmstudio_family_page(html);
+
+        assert_eq!(
+            parsed.concrete_models,
+            vec![
+                LmStudioCatalogEntry {
+                    model_key: "qwen/qwen3-coder-30b".to_string(),
+                    memory_gb: Some(15.0),
+                },
+                LmStudioCatalogEntry {
+                    model_key: "openai/gpt-oss-20b".to_string(),
+                    memory_gb: Some(12.0),
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_lmstudio_family_page_extracts_keywords_models() {
+        let html = r#"
+        <script type="application/ld+json">
+        {"@type":"CreativeWork","keywords":["Qwen3","qwen/qwen3-4b-2507","qwen/qwen3-coder-30b"]}
+        </script>
+        "#;
+
+        let parsed = parse_lmstudio_family_page(html);
+
+        assert_eq!(
+            parsed.concrete_models,
+            vec![
+                LmStudioCatalogEntry {
+                    model_key: "qwen/qwen3-4b-2507".to_string(),
+                    memory_gb: None,
+                },
+                LmStudioCatalogEntry {
+                    model_key: "qwen/qwen3-coder-30b".to_string(),
+                    memory_gb: None,
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_lmstudio_model_page_falls_back_to_narrative_content() {
+        let html = r#"
+        <script type="application/ld+json">
+        {"@type":"CreativeWork","keywords":["Nemotron 3","nvidia/nemotron-3-nano"]}
+        </script>
+        <a href="/models/nvidia/nemotron-3-nano">nvidia/nemotron-3-nano</a>
+        <p>Supports a context length of 1M tokens.</p>
+        <p>General purpose reasoning and chat model trained from scratch by NVIDIA. Contains 30B total parameters with only 3.5B active at a time for low-latency MoE inference.</p>
+        <p>Nemotron 3 models support tool use and reasoning. They are available in gguf and mlx.</p>
+        <a href="https://huggingface.co/lmstudio-community/NVIDIA-Nemotron-3-Nano-30B-A3B-GGUF">artifact</a>
+        "#;
+
+        let parsed = parse_lmstudio_model_page(html).expect("should parse fallback content");
+
+        assert_eq!(parsed.model_key, "nvidia/nemotron-3-nano");
+        assert_eq!(parsed.context_length, Some(1_048_576));
+        assert_eq!(parsed.parameter_count.as_deref(), Some("30B"));
+        assert!(parsed.capabilities.contains(&Capability::ToolUse));
+        assert_eq!(
+            parsed.artifact_name.as_deref(),
+            Some("lmstudio-community/NVIDIA-Nemotron-3-Nano-30B-A3B-GGUF")
+        );
+    }
+
+    #[test]
+    fn test_build_lmstudio_catalog_model_maps_page_to_llm_model() {
+        let page = LmStudioModelPageMetadata {
+            model_key: "qwen/qwen3-coder-30b".to_string(),
+            context_length: Some(262_144),
+            capabilities: vec![Capability::ToolUse],
+            parameter_count: Some("30B".to_string()),
+            artifact_name: Some("lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-GGUF".to_string()),
+            notes: Some("LM Studio catalog metadata".to_string()),
+        };
+
+        let model = build_lmstudio_catalog_model("qwen/qwen3-coder-30b", &page, Some(15.0))
+            .expect("model should build");
+
+        assert_eq!(model.name, "qwen/qwen3-coder-30b");
+        assert_eq!(model.provider, "qwen");
+        assert_eq!(model.parameter_count, "30B");
+        assert_eq!(model.context_length, 262_144);
+        assert!(model.min_ram_gb >= 15.0);
+        assert_eq!(model.metadata_source(), MetadataSource::LmStudioCatalog);
+        assert!(model.effective_capabilities().contains(&Capability::ToolUse));
+        assert_eq!(
+            model.gguf_sources[0].repo,
+            "lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-GGUF"
+        );
+    }
+
+    #[test]
+    fn test_build_lmstudio_catalog_model_uses_page_parameter_count_when_slug_lacks_size() {
+        let page = LmStudioModelPageMetadata {
+            model_key: "nvidia/nemotron-3-nano".to_string(),
+            context_length: Some(1_048_576),
+            capabilities: vec![Capability::ToolUse],
+            parameter_count: Some("30B".to_string()),
+            artifact_name: Some("lmstudio-community/NVIDIA-Nemotron-3-Nano-30B-A3B-GGUF".to_string()),
+            notes: Some("LM Studio catalog metadata".to_string()),
+        };
+
+        let model = build_lmstudio_catalog_model("nvidia/nemotron-3-nano", &page, Some(25.0))
+            .expect("model should build from page parameter count");
+
+        assert_eq!(model.name, "nvidia/nemotron-3-nano");
+        assert_eq!(model.parameter_count, "30B");
+        assert_eq!(model.parameters_raw, Some(30_000_000_000));
+        assert_eq!(model.effective_context_length(), 1_048_576);
+    }
+
+    #[test]
+    fn test_catalog_only_model_survives_cache_round_trip_into_model_database() {
+        let cache_path = cache_file().expect("cache path");
+        let overlay_path = lmstudio_metadata_cache_file().expect("overlay path");
+        let original_cache = std::fs::read_to_string(&cache_path).ok();
+        let original_overlay = std::fs::read_to_string(&overlay_path).ok();
+
+        let page = LmStudioModelPageMetadata {
+            model_key: "openai/gpt-oss-20b".to_string(),
+            context_length: Some(131_072),
+            capabilities: vec![Capability::ToolUse],
+            parameter_count: Some("20B".to_string()),
+            artifact_name: Some("lmstudio-community/gpt-oss-20b-gguf".to_string()),
+            notes: Some("LM Studio catalog metadata".to_string()),
+        };
+
+        let model = build_lmstudio_catalog_model("openai/gpt-oss-20b", &page, Some(12.0))
+            .expect("catalog model should build");
+        save_cache(&[model]).expect("save cache");
+
+        let db = crate::models::ModelDatabase::new();
+        let imported = db
+            .get_all_models()
+            .iter()
+            .find(|model| model.name == "openai/gpt-oss-20b")
+            .expect("imported model present");
+
+        assert_eq!(imported.provider, "openai");
+        assert_eq!(imported.effective_context_length(), 131_072);
+        assert!(imported.effective_capabilities().contains(&Capability::ToolUse));
+
+        if let Some(content) = original_cache {
+            if let Some(dir) = cache_path.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            let _ = std::fs::write(&cache_path, content);
+        } else {
+            let _ = std::fs::remove_file(&cache_path);
+        }
+        if let Some(content) = original_overlay {
+            if let Some(dir) = overlay_path.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            let _ = std::fs::write(&overlay_path, content);
+        } else {
+            let _ = std::fs::remove_file(&overlay_path);
+        }
     }
 }

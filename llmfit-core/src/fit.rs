@@ -145,18 +145,19 @@ impl ModelFit {
         force_runtime: Option<InferenceRuntime>,
     ) -> Self {
         let mut notes = Vec::new();
+        let model_context_length = model.effective_context_length();
         let estimation_ctx = context_limit
-            .map(|limit| limit.min(model.context_length))
-            .unwrap_or(model.context_length);
+            .map(|limit| limit.min(model_context_length))
+            .unwrap_or(model_context_length);
 
         let min_vram = model.min_vram_gb.unwrap_or(model.min_ram_gb);
         let use_case = UseCase::from_model(model);
         let default_mem_required =
             model.estimate_memory_gb(model.quantization.as_str(), estimation_ctx);
-        if estimation_ctx < model.context_length {
+        if estimation_ctx < model_context_length {
             notes.push(format!(
                 "Context capped for estimation: {} -> {} tokens",
-                model.context_length, estimation_ctx
+                model_context_length, estimation_ctx
             ));
         }
 
@@ -704,7 +705,10 @@ pub fn rank_models_by_fit_opts_col(
                 .utilization_pct
                 .partial_cmp(&a.utilization_pct)
                 .unwrap_or(std::cmp::Ordering::Equal),
-            SortColumn::Ctx => b.model.context_length.cmp(&a.model.context_length),
+            SortColumn::Ctx => b
+                .model
+                .effective_context_length()
+                .cmp(&a.model.effective_context_length()),
             SortColumn::ReleaseDate => {
                 let a_date = a.model.release_date.as_deref().unwrap_or("");
                 let b_date = b.model.release_date.as_deref().unwrap_or("");
@@ -904,6 +908,7 @@ fn compute_scores(
 /// Quality score: base quality from param count + family bump + quant penalty + task alignment.
 fn quality_score(model: &LlmModel, quant: &str, use_case: UseCase) -> f64 {
     let params = model.params_b();
+    let effective_use_case = model.effective_use_case().to_lowercase();
 
     // Base quality by parameter count
     let base = if params < 1.0 {
@@ -971,7 +976,7 @@ fn quality_score(model: &LlmModel, quant: &str, use_case: UseCase) -> f64 {
                 || name_lower.contains("qwen2.5")
                 || name_lower.contains("command-r")
                 || name_lower.contains("hermes")
-                || model.use_case.to_lowercase().contains("tool")
+                || effective_use_case.contains("tool")
             {
                 5.0
             } else {
@@ -979,7 +984,7 @@ fn quality_score(model: &LlmModel, quant: &str, use_case: UseCase) -> f64 {
             }
         }
         UseCase::Multimodal => {
-            if name_lower.contains("vision") || model.use_case.to_lowercase().contains("vision") {
+            if name_lower.contains("vision") || effective_use_case.contains("vision") {
                 6.0
             } else {
                 0.0
@@ -1028,15 +1033,16 @@ fn fit_score(required: f64, available: f64) -> f64 {
 
 /// Context score: context window capability vs target for the use case.
 fn context_score(model: &LlmModel, use_case: UseCase) -> f64 {
+    let context_length = model.effective_context_length();
     let target: u32 = match use_case {
         UseCase::General | UseCase::Chat => 4096,
         UseCase::Coding | UseCase::Reasoning | UseCase::Agentic => 8192,
         UseCase::Multimodal => 4096,
         UseCase::Embedding => 512,
     };
-    if model.context_length >= target {
+    if context_length >= target {
         100.0
-    } else if model.context_length >= target / 2 {
+    } else if context_length >= target / 2 {
         70.0
     } else {
         30.0
@@ -1090,6 +1096,7 @@ mod tests {
             format: models::ModelFormat::default(),
             num_attention_heads: None,
             num_key_value_heads: None,
+            metadata_overlay: None,
         }
     }
 
@@ -1270,6 +1277,7 @@ mod tests {
             format: models::ModelFormat::default(),
             num_attention_heads: None,
             num_key_value_heads: None,
+            metadata_overlay: None,
         };
         let mut system = test_system(64.0, true, Some(8.0));
         system.backend = GpuBackend::Cuda;
@@ -1305,6 +1313,7 @@ mod tests {
             format: models::ModelFormat::default(),
             num_attention_heads: None,
             num_key_value_heads: None,
+            metadata_overlay: None,
         };
         let system = test_system(12.0, true, Some(8.0));
 

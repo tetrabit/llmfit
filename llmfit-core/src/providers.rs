@@ -4,7 +4,10 @@
 //! The trait is designed to be extended for vLLM, etc.
 
 use std::collections::HashSet;
+use std::io::Read;
 use std::path::PathBuf;
+
+use crate::models::GgufSource;
 
 // ---------------------------------------------------------------------------
 // Provider trait
@@ -25,6 +28,13 @@ pub trait ModelProvider {
     /// Start pulling a model. Returns immediately; progress is polled
     /// via `pull_progress()`.
     fn start_pull(&self, model_tag: &str) -> Result<PullHandle, String>;
+
+    fn start_pull_candidates(&self, model_tags: &[String]) -> Result<PullHandle, String> {
+        let Some(first) = model_tags.first() else {
+            return Err("no model tags provided".to_string());
+        };
+        self.start_pull(first)
+    }
 }
 
 /// Handle returned by `start_pull`. The TUI polls this in a background
@@ -1365,11 +1375,17 @@ impl LmStudioProvider {
         )
     }
 
-    fn download_status_url(&self) -> String {
-        format!(
-            "{}/api/v1/models/download-status",
+    fn download_status_url_for_job(&self, job_id: Option<&str>) -> String {
+        let base = format!(
+            "{}/api/v1/models/download/status",
             self.base_url.trim_end_matches('/')
-        )
+        );
+        match job_id {
+            Some(job_id) if !job_id.trim().is_empty() => {
+                format!("{}/{}", base, job_id.trim())
+            }
+            _ => base,
+        }
     }
 
     fn cli_binary(&self) -> Option<String> {
@@ -1392,6 +1408,22 @@ impl LmStudioProvider {
         // and cannot resolve arbitrary HuggingFace repo IDs. Only use the CLI
         // fallback for native LM Studio model names (no '/').
         !model_tag.contains('/')
+    }
+
+    fn cli_fallback_tag(model_tag: &str) -> Option<String> {
+        let trimmed = model_tag.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        if Self::can_cli_download(trimmed) {
+            return Some(trimmed.to_string());
+        }
+        trimmed
+            .split('/')
+            .next_back()
+            .map(str::trim)
+            .filter(|tag| !tag.is_empty())
+            .map(ToString::to_string)
     }
 
     fn cli_models(&self) -> Option<(HashSet<String>, usize)> {
@@ -1474,34 +1506,7 @@ impl LmStudioProvider {
                 percent: None,
             });
 
-            let output = std::process::Command::new(cli)
-                .args(["get", &tag, "--yes"])
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .output();
-
-            match output {
-                Ok(output) if output.status.success() => {
-                    let _ = tx.send(PullEvent::Done);
-                }
-                Ok(output) => {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    let stdout = String::from_utf8_lossy(&output.stdout);
-                    let message = stderr.trim();
-                    let fallback = stdout.trim();
-                    let detail = if !message.is_empty() { message } else { fallback };
-                    let _ = tx.send(PullEvent::Error(if detail.is_empty() {
-                        "LM Studio CLI download failed".to_string()
-                    } else {
-                        format!("LM Studio CLI download failed: {}", detail)
-                    }));
-                }
-                Err(e) => {
-                    let _ = tx.send(PullEvent::Error(format!(
-                        "LM Studio CLI download error: {e}"
-                    )));
-                }
-            }
+            run_lmstudio_cli_download(cli, &tag, &tx);
         });
 
         Ok(PullHandle {
@@ -1553,6 +1558,178 @@ impl LmStudioProvider {
     }
 }
 
+fn lmstudio_cli_progress_percent(line: &str) -> Option<f64> {
+    let bytes = line.as_bytes();
+    for (idx, byte) in bytes.iter().enumerate() {
+        if *byte != b'%' {
+            continue;
+        }
+
+        let mut start = idx;
+        while start > 0 {
+            let ch = bytes[start - 1];
+            if ch.is_ascii_digit() || ch == b'.' {
+                start -= 1;
+            } else {
+                break;
+            }
+        }
+
+        if start == idx {
+            continue;
+        }
+
+        if let Ok(percent) = line[start..idx].parse::<f64>()
+            && (0.0..=100.0).contains(&percent)
+        {
+            return Some(percent);
+        }
+    }
+
+    None
+}
+
+fn flush_lmstudio_cli_chunk(
+    current: &mut Vec<u8>,
+    lines: &mut Vec<String>,
+    status_tx: Option<&std::sync::mpsc::Sender<PullEvent>>,
+) {
+    if current.is_empty() {
+        return;
+    }
+
+    let text = String::from_utf8_lossy(current).into_owned();
+    current.clear();
+    let trimmed = text.trim();
+
+    if trimmed.is_empty() {
+        return;
+    }
+
+    if lines.last().is_some_and(|last| last == trimmed) {
+        return;
+    }
+
+    let line = trimmed.to_string();
+    if let Some(tx) = status_tx {
+        let _ = tx.send(PullEvent::Progress {
+            status: format!("LM Studio CLI: {}", line),
+            percent: lmstudio_cli_progress_percent(&line),
+        });
+    }
+    lines.push(line);
+}
+
+fn collect_lmstudio_cli_output<R: Read>(
+    mut reader: R,
+    status_tx: Option<std::sync::mpsc::Sender<PullEvent>>,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut current = Vec::new();
+    let mut buf = [0_u8; 1024];
+
+    loop {
+        match reader.read(&mut buf) {
+            Ok(0) => break,
+            Ok(read) => {
+                for byte in &buf[..read] {
+                    match *byte {
+                        b'\r' | b'\n' => {
+                            flush_lmstudio_cli_chunk(&mut current, &mut lines, status_tx.as_ref());
+                        }
+                        _ => current.push(*byte),
+                    }
+                }
+            }
+            Err(_) => break,
+        }
+    }
+
+    flush_lmstudio_cli_chunk(&mut current, &mut lines, status_tx.as_ref());
+    lines
+}
+
+fn run_lmstudio_cli_download(
+    cli: String,
+    tag: &str,
+    tx: &std::sync::mpsc::Sender<PullEvent>,
+) {
+    let mut child = match std::process::Command::new(cli)
+        .args(["get", tag, "--yes"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(e) => {
+            let _ = tx.send(PullEvent::Error(format!(
+                "LM Studio CLI download error: {e}"
+            )));
+            return;
+        }
+    };
+
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let stdout_handle = stdout.map(|stdout| {
+        let status_tx = tx.clone();
+        std::thread::spawn(move || collect_lmstudio_cli_output(stdout, Some(status_tx)))
+    });
+    let stderr_handle = stderr
+        .map(|stderr| std::thread::spawn(move || collect_lmstudio_cli_output(stderr, None)));
+
+    match child.wait() {
+        Ok(status) if status.success() => {
+            if let Some(handle) = stdout_handle {
+                let _ = handle.join();
+            }
+            if let Some(handle) = stderr_handle {
+                let _ = handle.join();
+            }
+            let _ = tx.send(PullEvent::Done);
+        }
+        Ok(_status) => {
+            let stdout_lines = stdout_handle
+                .and_then(|handle| handle.join().ok())
+                .unwrap_or_default();
+            let stderr_lines = stderr_handle
+                .and_then(|handle| handle.join().ok())
+                .unwrap_or_default();
+            let detail = stderr_lines
+                .last()
+                .cloned()
+                .or_else(|| stdout_lines.last().cloned())
+                .unwrap_or_default();
+            let _ = tx.send(PullEvent::Error(if detail.is_empty() {
+                "LM Studio CLI download failed".to_string()
+            } else {
+                format!("LM Studio CLI download failed: {}", detail)
+            }));
+        }
+        Err(e) => {
+            if let Some(handle) = stdout_handle {
+                let _ = handle.join();
+            }
+            if let Some(handle) = stderr_handle {
+                let _ = handle.join();
+            }
+            let _ = tx.send(PullEvent::Error(format!("LM Studio CLI download error: {e}")));
+        }
+    }
+}
+
+fn rewrite_lmstudio_cli_error_for_fallback(message: String) -> String {
+    if let Some(detail) = message.strip_prefix("LM Studio CLI download failed: ") {
+        format!("LM Studio CLI fallback failed: {detail}")
+    } else if message == "LM Studio CLI download failed" {
+        "LM Studio CLI fallback failed".to_string()
+    } else if let Some(detail) = message.strip_prefix("LM Studio CLI download error: ") {
+        format!("LM Studio CLI fallback error: {detail}")
+    } else {
+        message
+    }
+}
+
 #[derive(serde::Deserialize)]
 struct LmStudioModelList {
     models: Vec<LmStudioModel>,
@@ -1576,8 +1753,10 @@ struct LmStudioDownloadResponse {
     total_size_bytes: Option<u64>,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(Clone, serde::Deserialize)]
 struct LmStudioDownloadStatus {
+    #[serde(default)]
+    job_id: Option<String>,
     #[serde(default)]
     status: String,
     #[serde(default)]
@@ -1586,6 +1765,62 @@ struct LmStudioDownloadStatus {
     downloaded_bytes: Option<u64>,
     #[serde(default)]
     total_size_bytes: Option<u64>,
+}
+
+fn lmstudio_status_is_active(status: &str) -> bool {
+    status == "downloading" || status == "paused" || status == "completed" || status == "failed"
+}
+
+fn parse_lmstudio_download_status(
+    body: &str,
+    target_job_id: Option<&str>,
+) -> Option<LmStudioDownloadStatus> {
+    // Real LM Studio API (v1) returns a single object, not an array.
+    // Try single object first; fall back to array for compat with older/non-standard responses.
+    if let Ok(single) = serde_json::from_str::<LmStudioDownloadStatus>(body) {
+        // Verify it has a non-empty status so we don't accept random JSON objects
+        if !single.status.is_empty() {
+            return Some(single);
+        }
+    }
+
+    // Fallback: array shape (older API or multi-job listing)
+    if let Ok(statuses) = serde_json::from_str::<Vec<LmStudioDownloadStatus>>(body) {
+        if let Some(job_id) = target_job_id {
+            if let Some(status) = statuses
+                .iter()
+                .find(|s| s.job_id.as_deref() == Some(job_id))
+                .cloned()
+            {
+                return Some(status);
+            }
+        }
+        return statuses
+            .into_iter()
+            .find(|s| lmstudio_status_is_active(&s.status));
+    }
+
+    None
+}
+fn lmstudio_progress_percent(status: &LmStudioDownloadStatus) -> Option<f64> {
+    // Primary: bytes-based progress (official LM Studio v1 API)
+    if let (Some(downloaded), Some(total)) = (status.downloaded_bytes, status.total_size_bytes) {
+        if total > 0 {
+            return Some(downloaded as f64 / total as f64 * 100.0);
+        }
+    }
+    // Fallback: `progress` field (unofficial / older API versions)
+    status.progress.map(|p| {
+        if p <= 1.0 { p * 100.0 } else { p.min(100.0) }
+    })
+}
+
+fn lmstudio_http_error_is_retryable(error: &ureq::Error) -> bool {
+    matches!(error, ureq::Error::StatusCode(404))
+}
+
+fn format_lmstudio_candidate_failure(tag: &str, error: &ureq::Error) -> String {
+    format!("{} ({})", tag, error)
 }
 
 impl ModelProvider for LmStudioProvider {
@@ -1603,44 +1838,74 @@ impl ModelProvider for LmStudioProvider {
     }
 
     fn start_pull(&self, model_tag: &str) -> Result<PullHandle, String> {
+        self.start_pull_candidates(&[model_tag.to_string()])
+    }
+
+    fn start_pull_candidates(&self, model_tags: &[String]) -> Result<PullHandle, String> {
+        let candidates: Vec<String> = model_tags
+            .iter()
+            .map(|tag| tag.trim())
+            .filter(|tag| !tag.is_empty())
+            .map(ToString::to_string)
+            .fold(Vec::new(), |mut acc, tag| {
+                if !acc.iter().any(|existing| existing.eq_ignore_ascii_case(&tag)) {
+                    acc.push(tag);
+                }
+                acc
+            });
+        let Some(first_tag) = candidates.first().cloned() else {
+            return Err("no model tags provided".to_string());
+        };
+
+        let cli_binary = self.cli_binary();
+        let cli_direct_available = self.is_local_host()
+            && candidates.iter().any(|tag| Self::can_cli_download(tag))
+            && cli_binary.is_some();
+
         let api_available = if self.is_local_host() {
-            self.ensure_local_server_running()?
+            match self.ensure_local_server_running() {
+                Ok(available) => available,
+                Err(_err) if cli_direct_available => false,
+                Err(err) => return Err(err),
+            }
         } else {
             self.api_reachable(800)
         };
 
-        let cli_binary = self.cli_binary();
-        let cli_available = self.is_local_host() && Self::can_cli_download(model_tag) && cli_binary.is_some();
-
-        if !api_available && cli_available {
-            return self.start_pull_via_cli(model_tag);
+        if !api_available && cli_direct_available {
+            if let Some(cli_tag) = candidates.iter().find_map(|tag| Self::cli_fallback_tag(tag)) {
+                return self.start_pull_via_cli(&cli_tag);
+            }
         }
 
         let provider = self.clone();
         let download_url = self.download_url();
-        let status_url = self.download_status_url();
-        let tag = model_tag.to_string();
-        let cli = if self.is_local_host() && Self::can_cli_download(model_tag) {
-            cli_binary
+        let cli = if self.is_local_host() {
+            cli_binary.and_then(|cli| {
+                candidates
+                    .iter()
+                    .find_map(|tag| Self::cli_fallback_tag(tag).map(|fallback| (cli.clone(), fallback)))
+            })
         } else {
             None
         };
         let (tx, rx) = std::sync::mpsc::channel();
-
-        let body = serde_json::json!({
-            "model": tag,
-        });
+        let model_tag = first_tag;
+        let http_candidates = candidates.clone();
 
         std::thread::spawn(move || {
-            // Initiate download
-            let resp = ureq::post(&download_url)
-                .config()
-                .timeout_global(Some(std::time::Duration::from_secs(30)))
-                .build()
-                .send_json(&body);
+            let mut candidate_failures = Vec::new();
 
-            match resp {
-                Ok(resp) => {
+            for tag in &http_candidates {
+                let body = serde_json::json!({ "model": tag });
+                let resp = ureq::post(&download_url)
+                    .config()
+                    .timeout_global(Some(std::time::Duration::from_secs(30)))
+                    .build()
+                    .send_json(&body);
+
+                match resp {
+                    Ok(resp) => {
                     let Ok(dl_resp) = resp.into_body().read_json::<LmStudioDownloadResponse>()
                     else {
                         let _ = tx.send(PullEvent::Error(
@@ -1664,15 +1929,23 @@ impl ModelProvider for LmStudioProvider {
                     }
 
                     let _ = tx.send(PullEvent::Progress {
-                        status: format!("Downloading via LM Studio ({})", dl_resp.status),
-                        percent: Some(0.0),
+                        status: format!("Downloading {} via LM Studio ({})", tag, dl_resp.status),
+                        percent: None,
                     });
+                    let job_id = dl_resp.job_id.clone();
+                    if job_id.as_deref().is_none_or(|id| id.trim().is_empty()) {
+                        let _ = tx.send(PullEvent::Error(
+                            "LM Studio download started without a job id".to_string(),
+                        ));
+                        return;
+                    }
+                    let poll_url = provider.download_status_url_for_job(job_id.as_deref());
 
                     // Poll for progress
                     loop {
                         std::thread::sleep(std::time::Duration::from_millis(500));
 
-                        let poll = ureq::get(&status_url)
+                        let poll = ureq::get(&poll_url)
                             .config()
                             .timeout_global(Some(std::time::Duration::from_secs(10)))
                             .build()
@@ -1686,41 +1959,27 @@ impl ModelProvider for LmStudioProvider {
                                     Err(_) => continue,
                                 };
 
-                                // Try parsing as array first
-                                let status_opt: Option<LmStudioDownloadStatus> =
-                                    if let Ok(statuses) =
-                                        serde_json::from_str::<Vec<LmStudioDownloadStatus>>(
-                                            &body_str,
-                                        )
-                                    {
-                                        // Find our job by looking for a downloading status
-                                        statuses.into_iter().find(|s| {
-                                            s.status == "downloading"
-                                                || s.status == "completed"
-                                                || s.status == "failed"
-                                        })
-                                    } else {
-                                        serde_json::from_str(&body_str).ok()
-                                    };
+                                let status_opt =
+                                    parse_lmstudio_download_status(&body_str, job_id.as_deref());
 
                                 let Some(st) = status_opt else {
+                                    let _ = tx.send(PullEvent::Progress {
+                                        status: format!(
+                                            "Downloading {} via LM Studio (waiting for progress...)",
+                                            tag
+                                        ),
+                                        percent: None,
+                                    });
                                     continue;
                                 };
 
-                                let percent = st.progress.map(|p| p * 100.0).or_else(|| {
-                                    match (st.downloaded_bytes, st.total_size_bytes) {
-                                        (Some(dl), Some(total)) if total > 0 => {
-                                            Some(dl as f64 / total as f64 * 100.0)
-                                        }
-                                        _ => None,
-                                    }
-                                });
+                                let percent = lmstudio_progress_percent(&st);
 
                                 if st.status == "completed" {
-                                    let _ = tx.send(PullEvent::Progress {
-                                        status: "Download complete".to_string(),
-                                        percent: Some(100.0),
-                                    });
+                                let _ = tx.send(PullEvent::Progress {
+                                    status: format!("Download complete ({})", tag),
+                                    percent: Some(100.0),
+                                });
                                     let _ = tx.send(PullEvent::Done);
                                     return;
                                 }
@@ -1733,18 +1992,29 @@ impl ModelProvider for LmStudioProvider {
                                 }
 
                                 let _ = tx.send(PullEvent::Progress {
-                                    status: "Downloading via LM Studio...".to_string(),
+                                    status: format!("Downloading {} via LM Studio...", tag),
                                     percent,
                                 });
                             }
                             Err(_) => {
-                                // Status endpoint unreachable, keep trying
+                                let _ = tx.send(PullEvent::Progress {
+                                    status: format!(
+                                        "Downloading {} via LM Studio (checking progress...)",
+                                        tag
+                                    ),
+                                    percent: None,
+                                });
                                 continue;
                             }
                         }
                     }
-                }
-                Err(e) => {
+                    }
+                    Err(e) => {
+                    if lmstudio_http_error_is_retryable(&e) {
+                        candidate_failures.push(format_lmstudio_candidate_failure(tag, &e));
+                        continue;
+                    }
+
                     if provider.is_local_host()
                         && provider.ensure_local_server_running().is_ok()
                     {
@@ -1781,16 +2051,24 @@ impl ModelProvider for LmStudioProvider {
 
                             let _ = tx.send(PullEvent::Progress {
                                 status: format!(
-                                    "Downloading via LM Studio ({})",
-                                    dl_resp.status
+                                    "Downloading {} via LM Studio ({})",
+                                    tag, dl_resp.status
                                 ),
-                                percent: Some(0.0),
+                                percent: None,
                             });
+                            let job_id = dl_resp.job_id.clone();
+                            if job_id.as_deref().is_none_or(|id| id.trim().is_empty()) {
+                                let _ = tx.send(PullEvent::Error(
+                                    "LM Studio download started without a job id".to_string(),
+                                ));
+                                return;
+                            }
+                            let poll_url = provider.download_status_url_for_job(job_id.as_deref());
 
                             loop {
                                 std::thread::sleep(std::time::Duration::from_millis(500));
 
-                                let poll = ureq::get(&status_url)
+                                let poll = ureq::get(&poll_url)
                                     .config()
                                     .timeout_global(Some(std::time::Duration::from_secs(10)))
                                     .build()
@@ -1803,36 +2081,27 @@ impl ModelProvider for LmStudioProvider {
                                             Err(_) => continue,
                                         };
 
-                                        let status_opt: Option<LmStudioDownloadStatus> =
-                                            if let Ok(statuses) =
-                                                serde_json::from_str::<Vec<LmStudioDownloadStatus>>(
-                                                    &body_str,
-                                                ) {
-                                                statuses.into_iter().find(|s| {
-                                                    s.status == "downloading"
-                                                        || s.status == "completed"
-                                                        || s.status == "failed"
-                                                })
-                                            } else {
-                                                serde_json::from_str(&body_str).ok()
-                                            };
+                                        let status_opt = parse_lmstudio_download_status(
+                                            &body_str,
+                                            job_id.as_deref(),
+                                        );
 
                                         let Some(st) = status_opt else {
+                                            let _ = tx.send(PullEvent::Progress {
+                                                status: format!(
+                                                    "Downloading {} via LM Studio (waiting for progress...)",
+                                                    tag
+                                                ),
+                                                percent: None,
+                                            });
                                             continue;
                                         };
 
-                                        let percent = st.progress.map(|p| p * 100.0).or_else(|| {
-                                            match (st.downloaded_bytes, st.total_size_bytes) {
-                                                (Some(dl), Some(total)) if total > 0 => {
-                                                    Some(dl as f64 / total as f64 * 100.0)
-                                                }
-                                                _ => None,
-                                            }
-                                        });
+                                        let percent = lmstudio_progress_percent(&st);
 
                                         if st.status == "completed" {
                                             let _ = tx.send(PullEvent::Progress {
-                                                status: "Download complete".to_string(),
+                                                status: format!("Download complete ({})", tag),
                                                 percent: Some(100.0),
                                             });
                                             let _ = tx.send(PullEvent::Done);
@@ -1847,65 +2116,114 @@ impl ModelProvider for LmStudioProvider {
                                         }
 
                                         let _ = tx.send(PullEvent::Progress {
-                                            status: "Downloading via LM Studio...".to_string(),
+                                            status: format!("Downloading {} via LM Studio...", tag),
                                             percent,
                                         });
                                     }
-                                    Err(_) => continue,
+                                    Err(_) => {
+                                        let _ = tx.send(PullEvent::Progress {
+                                            status: format!(
+                                                "Downloading {} via LM Studio (checking progress...)",
+                                                tag
+                                            ),
+                                            percent: None,
+                                        });
+                                        continue;
+                                    }
                                 }
                             }
+                        } else if let Err(retry_err) = retry_resp
+                            && lmstudio_http_error_is_retryable(&retry_err)
+                        {
+                            candidate_failures
+                                .push(format_lmstudio_candidate_failure(tag, &retry_err));
+                            continue;
                         }
                     }
 
-                    if let Some(cli) = cli {
+                    if let Some((cli, cli_tag)) = cli.clone() {
                         let _ = tx.send(PullEvent::Progress {
-                            status: format!(
-                                "LM Studio API unavailable ({e}); falling back to CLI ({tag})"
-                            ),
+                            status: format!("Trying LM Studio CLI fallback ({cli_tag})"),
                             percent: None,
                         });
 
-                        let output = std::process::Command::new(cli)
-                            .args(["get", &tag, "--yes"])
-                            .stdout(std::process::Stdio::piped())
-                            .stderr(std::process::Stdio::piped())
-                            .output();
+                        let (cli_tx, cli_rx) = std::sync::mpsc::channel();
+                        run_lmstudio_cli_download(cli, &cli_tag, &cli_tx);
 
-                        match output {
-                            Ok(output) if output.status.success() => {
-                                let _ = tx.send(PullEvent::Done);
-                            }
-                            Ok(output) => {
-                                let stderr = String::from_utf8_lossy(&output.stderr);
-                                let stdout = String::from_utf8_lossy(&output.stdout);
-                                let detail = stderr.trim();
-                                let fallback = stdout.trim();
-                                let message = if !detail.is_empty() { detail } else { fallback };
-                                let _ = tx.send(PullEvent::Error(if message.is_empty() {
-                                    format!("LM Studio download error: {e}")
-                                } else {
-                                    format!(
-                                        "LM Studio API error: {e}; CLI fallback failed: {}",
-                                        message
-                                    )
-                                }));
-                            }
-                            Err(cli_err) => {
-                                let _ = tx.send(PullEvent::Error(format!(
-                                    "LM Studio download error: {e}; CLI fallback error: {cli_err}"
-                                )));
+                        while let Ok(event) = cli_rx.recv() {
+                            match event {
+                                PullEvent::Error(message) => {
+                                    let _ = tx.send(PullEvent::Error(
+                                        rewrite_lmstudio_cli_error_for_fallback(message),
+                                    ));
+                                    return;
+                                }
+                                other => {
+                                    let done = matches!(other, PullEvent::Done);
+                                    let _ = tx.send(other);
+                                    if done {
+                                        return;
+                                    }
+                                }
                             }
                         }
                         return;
                     }
 
-                    let _ = tx.send(PullEvent::Error(format!("LM Studio download error: {e}")));
+                    let _ = tx.send(PullEvent::Error(if candidate_failures.is_empty() {
+                        format!("LM Studio download error: {e}")
+                    } else {
+                        format!(
+                            "LM Studio download failed after trying: {}",
+                            candidate_failures.join(", ")
+                        )
+                    }));
+                    return;
+                    }
                 }
             }
+
+            if let Some((cli, cli_tag)) = cli {
+                let _ = tx.send(PullEvent::Progress {
+                    status: format!("Trying LM Studio CLI fallback ({cli_tag})"),
+                    percent: None,
+                });
+
+                let (cli_tx, cli_rx) = std::sync::mpsc::channel();
+                run_lmstudio_cli_download(cli, &cli_tag, &cli_tx);
+
+                while let Ok(event) = cli_rx.recv() {
+                    match event {
+                        PullEvent::Error(message) => {
+                            let _ = tx.send(PullEvent::Error(
+                                rewrite_lmstudio_cli_error_for_fallback(message),
+                            ));
+                            return;
+                        }
+                        other => {
+                            let done = matches!(other, PullEvent::Done);
+                            let _ = tx.send(other);
+                            if done {
+                                return;
+                            }
+                        }
+                    }
+                }
+                return;
+            }
+
+            let _ = tx.send(PullEvent::Error(if candidate_failures.is_empty() {
+                "LM Studio download failed".to_string()
+            } else {
+                format!(
+                    "LM Studio download failed after trying: {}",
+                    candidate_failures.join(", ")
+                )
+            }));
         });
 
         Ok(PullHandle {
-            model_tag: model_tag.to_string(),
+            model_tag,
             receiver: rx,
         })
     }
@@ -2133,6 +2451,51 @@ pub fn lmstudio_pull_tag(hf_name: &str) -> Option<String> {
         .find(|(name, _)| *name == lower)
         .map(|(_, tag)| (*tag).to_string())
         .or_else(|| Some(hf_name.to_string()))
+}
+
+pub fn lmstudio_download_candidates(
+    hf_name: &str,
+    gguf_sources: &[GgufSource],
+) -> Vec<String> {
+    let mut candidates = Vec::new();
+
+    for source in gguf_sources {
+        if source.repo.trim().is_empty() {
+            continue;
+        }
+        let repo = source.repo.trim();
+        let is_lmstudio_native = repo.starts_with("lmstudio-community/")
+            || source.provider.eq_ignore_ascii_case("lmstudio-community");
+        if is_lmstudio_native {
+            push_unique_candidate(&mut candidates, repo.to_string());
+            push_unique_candidate(&mut candidates, format!("https://huggingface.co/{repo}"));
+            if let Some(stripped) = repo.split('/').next_back() {
+                push_unique_candidate(&mut candidates, stripped.trim().to_string());
+            }
+        }
+    }
+
+    for candidate in hf_name_to_lmstudio_candidates(hf_name) {
+        push_unique_candidate(&mut candidates, candidate);
+    }
+
+    for source in gguf_sources {
+        if source.repo.trim().is_empty() {
+            continue;
+        }
+        let repo = source.repo.trim();
+        let is_lmstudio_native = repo.starts_with("lmstudio-community/")
+            || source.provider.eq_ignore_ascii_case("lmstudio-community");
+        if !is_lmstudio_native {
+            push_unique_candidate(&mut candidates, repo.to_string());
+            push_unique_candidate(&mut candidates, format!("https://huggingface.co/{repo}"));
+            if let Some(stripped) = repo.split('/').next_back() {
+                push_unique_candidate(&mut candidates, stripped.trim().to_string());
+            }
+        }
+    }
+
+    candidates
 }
 
 // ---------------------------------------------------------------------------
@@ -2372,6 +2735,10 @@ const LLAMACPP_GGUF_MAPPINGS: &[(&str, &str)] = &[
     (
         "smollm2-135m-instruct",
         "bartowski/SmolLM2-135M-Instruct-GGUF",
+    ),
+    (
+        "gigachat3.1-10b-a1.8b-bf16",
+        "mradermacher/GigaChat3.1-10B-A1.8B-bf16-GGUF",
     ),
 ];
 
@@ -3265,6 +3632,7 @@ mod tests {
         // Models with hardcoded mappings should be found
         assert!(lookup_gguf_repo("meta-llama/Llama-3.1-8B-Instruct").is_some());
         assert!(lookup_gguf_repo("deepseek-r1").is_some());
+        assert!(lookup_gguf_repo("ai-sage/GigaChat3.1-10B-A1.8B-bf16").is_some());
     }
 
     #[test]
@@ -3275,6 +3643,7 @@ mod tests {
     #[test]
     fn test_has_gguf_mapping_matches_known_models() {
         assert!(has_gguf_mapping("meta-llama/Llama-3.1-8B-Instruct"));
+        assert!(has_gguf_mapping("ai-sage/GigaChat3.1-10B-A1.8B-bf16"));
         assert!(!has_gguf_mapping("some-random/UnknownModel"));
     }
 
@@ -3295,6 +3664,15 @@ mod tests {
         let candidates = hf_name_to_gguf_candidates("meta-llama/Llama-3.1-8B-Instruct");
         assert_eq!(candidates.len(), 1);
         assert!(candidates[0].contains("GGUF"));
+    }
+
+    #[test]
+    fn test_gguf_candidates_gigachat_use_known_repo() {
+        let candidates = hf_name_to_gguf_candidates("ai-sage/GigaChat3.1-10B-A1.8B-bf16");
+        assert_eq!(
+            candidates,
+            vec!["mradermacher/GigaChat3.1-10B-A1.8B-bf16-GGUF".to_string()]
+        );
     }
 
     // ── select_best_gguf ─────────────────────────────────────────────
@@ -3695,6 +4073,87 @@ mod tests {
         assert!(!LmStudioProvider::can_cli_download(
             "meta-llama/Llama-3.1-8B-Instruct"
         ));
+    }
+
+    #[test]
+    fn test_lmstudio_cli_fallback_tag_strips_owner_when_needed() {
+        assert_eq!(
+            LmStudioProvider::cli_fallback_tag("lmstudio-community/SmolLM3-3B-GGUF"),
+            Some("SmolLM3-3B-GGUF".to_string())
+        );
+        assert_eq!(
+            LmStudioProvider::cli_fallback_tag("qwen3.5-9b"),
+            Some("qwen3.5-9b".to_string())
+        );
+        assert_eq!(LmStudioProvider::cli_fallback_tag("   "), None);
+    }
+
+    #[test]
+    fn test_lmstudio_cli_progress_percent_parses_real_progress_bar_output() {
+        let line = "⠋ [████████████▌         ]  57.23% |  2.67 GB /  4.68 GB |  45.12 MB/s | ETA 00:43";
+        let pct = lmstudio_cli_progress_percent(line).expect("should parse percent");
+        assert!((pct - 57.23).abs() < 0.001, "expected 57.23, got {pct}");
+    }
+
+    #[test]
+    fn test_lmstudio_cli_progress_percent_ignores_non_percent_lines() {
+        assert_eq!(lmstudio_cli_progress_percent("Resolving download plan..."), None);
+        assert_eq!(
+            lmstudio_cli_progress_percent("Finalizing download..."),
+            None
+        );
+        assert_eq!(
+            lmstudio_cli_progress_percent("↓ To download: model Meta-Llama-3.1-8B-Instruct Q4_K_M [GGUF] - 4.68 GB"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_parse_lmstudio_download_status_single_object() {
+        // Real LM Studio v1 API returns a single object, not an array
+        let body = r#"{"job_id":"job_493c7c9ded","status":"downloading","total_size_bytes":2000,"downloaded_bytes":1000}"#;
+
+        let status = parse_lmstudio_download_status(body, Some("job_493c7c9ded"))
+            .expect("single-object status should be parsed");
+
+        assert_eq!(status.job_id.as_deref(), Some("job_493c7c9ded"));
+        assert_eq!(status.status, "downloading");
+        let pct = lmstudio_progress_percent(&status).expect("percent should be computed");
+        assert!((pct - 50.0).abs() < 0.1, "expected ~50%, got {pct}");
+    }
+
+    #[test]
+    fn test_parse_lmstudio_download_status_array_fallback() {
+        // Older / non-standard responses may still return an array.
+        // When single-object parse fails (array is not valid as single object with status),
+        // the array branch picks the active job matching the target job_id.
+        let body = r#"[
+            {"job_id":"job-1","status":"downloading","downloaded_bytes":400,"total_size_bytes":1000},
+            {"job_id":"job-2","status":"downloading","downloaded_bytes":720,"total_size_bytes":1000}
+        ]"#;
+
+        let status = parse_lmstudio_download_status(body, Some("job-2"))
+            .expect("array-fallback with matching job_id should be found");
+
+        assert_eq!(status.job_id.as_deref(), Some("job-2"));
+        let pct = lmstudio_progress_percent(&status).expect("percent computed");
+        assert!((pct - 72.0).abs() < 0.1, "expected ~72%, got {pct}");
+    }
+
+    #[test]
+    fn test_lmstudio_download_status_url_uses_job_id_path() {
+        let provider = LmStudioProvider {
+            base_url: "http://127.0.0.1:1234".to_string(),
+        };
+
+        assert_eq!(
+            provider.download_status_url_for_job(Some("job_493c7c9ded")),
+            "http://127.0.0.1:1234/api/v1/models/download/status/job_493c7c9ded"
+        );
+        assert_eq!(
+            provider.download_status_url_for_job(None),
+            "http://127.0.0.1:1234/api/v1/models/download/status"
+        );
     }
 
     #[test]

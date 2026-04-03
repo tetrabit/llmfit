@@ -1092,17 +1092,17 @@ impl App {
                 let matches_search = if terms.is_empty() {
                     true
                 } else {
-                    let caps_text = fit
-                        .model
-                        .capabilities
+                    let effective_capabilities = fit.model.effective_capabilities();
+                    let effective_context_length = fit.model.effective_context_length();
+                    let caps_text = effective_capabilities
                         .iter()
                         .map(|c| c.label().to_lowercase())
                         .collect::<Vec<_>>()
                         .join(" ");
                     let context_text = format!(
                         "{} {}",
-                        fit.model.context_length,
-                        llmfit_core::models::format_context_length(fit.model.context_length)
+                        effective_context_length,
+                        llmfit_core::models::format_context_length(effective_context_length)
                             .to_lowercase()
                     );
                     // Combine all searchable fields into one string
@@ -1111,7 +1111,7 @@ impl App {
                         fit.model.name.to_lowercase(),
                         fit.model.provider.to_lowercase(),
                         fit.model.parameter_count.to_lowercase(),
-                        fit.model.use_case.to_lowercase(),
+                        fit.model.effective_use_case().to_lowercase(),
                         fit.use_case.label().to_lowercase(),
                         caps_text,
                         context_text,
@@ -1121,7 +1121,7 @@ impl App {
                         searchable.contains(term)
                             || llmfit_core::models::context_matches_search_term(
                                 term,
-                                fit.model.context_length,
+                                effective_context_length,
                             )
                     })
                 };
@@ -1173,7 +1173,7 @@ impl App {
                             .iter()
                             .zip(self.selected_capabilities.iter())
                             .filter(|(_, sel)| **sel)
-                            .any(|(cap, _)| fit.model.capabilities.contains(cap))
+                            .any(|(cap, _)| fit.model.effective_capabilities().contains(cap))
                     }
                 };
 
@@ -1235,7 +1235,7 @@ impl App {
                 let matches_context = self
                     .context_filter
                     .min_context()
-                    .map(|min_context| fit.model.context_length >= min_context)
+                    .map(|min_context| fit.model.effective_context_length() >= min_context)
                     .unwrap_or(true);
 
                 matches_search
@@ -1926,6 +1926,10 @@ impl App {
         self.input_mode = InputMode::Normal;
     }
 
+    pub fn open_quant_popup(&mut self) {
+        self.input_mode = InputMode::QuantPopup;
+    }
+
     pub fn quant_popup_up(&mut self) {
         if self.quant_cursor > 0 {
             self.quant_cursor -= 1;
@@ -2388,16 +2392,25 @@ impl App {
         }
     }
 
+    fn lmstudio_download_candidates(&self, model_name: &str) -> Vec<String> {
+        self.all_fits
+            .iter()
+            .find(|fit| fit.model.name == model_name)
+            .map(|fit| providers::lmstudio_download_candidates(model_name, &fit.model.gguf_sources))
+            .unwrap_or_else(|| providers::lmstudio_download_candidates(model_name, &[]))
+    }
+
     fn start_lmstudio_download(&mut self, model_name: String) {
-        let Some(tag) = providers::lmstudio_pull_tag(&model_name) else {
+        let candidates = self.lmstudio_download_candidates(&model_name);
+        let Some(primary_tag) = candidates.first().cloned() else {
             self.pull_status = Some("Not available for LM Studio".to_string());
             return;
         };
-        match self.lmstudio.start_pull(&tag) {
+        match self.lmstudio.start_pull_candidates(&candidates) {
             Ok(handle) => {
                 self.pull_model_name = Some(model_name);
-                self.pull_status = Some(format!("Downloading {} via LM Studio...", tag));
-                self.pull_percent = Some(0.0);
+                self.pull_status = Some(format!("Downloading {} via LM Studio...", primary_tag));
+                self.pull_percent = None;
                 self.pull_provider = Some(ActivePullProvider::LmStudio);
                 self.pull_active = Some(handle);
             }
@@ -2422,23 +2435,34 @@ impl App {
         loop {
             match handle.receiver.try_recv() {
                 Ok(PullEvent::Progress { status, percent }) => {
-                    if let Some(p) = percent {
-                        self.pull_percent = Some(p);
-                    }
+                    self.pull_percent = percent;
                     self.pull_status = Some(status);
                 }
                 Ok(PullEvent::Done) => {
-                    let done_msg = if let Some(provider) = self.pull_provider {
+                    let completed_provider = self.pull_provider;
+                    let completed_model_name = self.pull_model_name.clone();
+                    self.pull_percent = None;
+                    self.pull_active = None;
+                    self.pull_provider = None;
+                    self.refresh_installed();
+
+                    let done_msg = if completed_provider == Some(ActivePullProvider::LmStudio)
+                        && let Some(model_name) = completed_model_name.as_deref()
+                        && !providers::is_model_installed_lmstudio(
+                            model_name,
+                            &self.lmstudio_installed,
+                        )
+                    {
+                        format!(
+                            "LM Studio reported completion, but '{}' is not installed yet",
+                            model_name
+                        )
+                    } else if let Some(provider) = completed_provider {
                         format!("Download complete via {}!", provider.label())
                     } else {
                         "Download complete!".to_string()
                     };
                     self.pull_status = Some(done_msg);
-                    self.pull_percent = None;
-                    self.pull_active = None;
-                    self.pull_provider = None;
-                    // Refresh installed models
-                    self.refresh_installed();
                     return;
                 }
                 Ok(PullEvent::Error(e)) => {
@@ -2673,12 +2697,18 @@ mod tests {
     use llmfit_core::{
         fit::{FitLevel, InferenceRuntime, ModelFit, RunMode, ScoreComponents},
         hardware::{GpuBackend, SystemSpecs},
-        models::{Capability, LlmModel, ModelFormat, UseCase},
+        models::{Capability, GgufSource, LlmModel, ModelFormat, UseCase},
     };
-    use std::collections::{HashMap, HashSet};
+    use std::collections::{HashMap, HashSet, VecDeque};
     use std::fs;
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
+    use std::sync::{Arc, Mutex, OnceLock};
     use std::sync::mpsc;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::thread;
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     fn temp_path(name: &str) -> std::path::PathBuf {
         let nanos = SystemTime::now()
@@ -2686,6 +2716,910 @@ mod tests {
             .expect("clock should be after unix epoch")
             .as_nanos();
         std::env::temp_dir().join(format!("llmfit-{name}-{nanos}.json"))
+    }
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = temp_path(name);
+        fs::create_dir_all(&dir).expect("should create temp dir");
+        dir
+    }
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn take_env_lock() -> std::sync::MutexGuard<'static, ()> {
+        match env_lock().lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    struct EnvGuard {
+        old_host: Option<String>,
+        old_path: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn install(host: Option<&str>, prepend_path: Option<&std::path::Path>) -> Self {
+            let old_host = std::env::var("LMSTUDIO_HOST").ok();
+            let old_path = std::env::var("PATH").ok();
+
+            if let Some(host) = host {
+                unsafe { std::env::set_var("LMSTUDIO_HOST", host) };
+            } else {
+                unsafe { std::env::remove_var("LMSTUDIO_HOST") };
+            }
+
+            if let Some(path) = prepend_path {
+                let mut parts = vec![path.display().to_string()];
+                if let Some(existing) = &old_path {
+                    parts.push(existing.clone());
+                }
+                unsafe { std::env::set_var("PATH", parts.join(":")) };
+            }
+
+            Self { old_host, old_path }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            if let Some(host) = &self.old_host {
+                unsafe { std::env::set_var("LMSTUDIO_HOST", host) };
+            } else {
+                unsafe { std::env::remove_var("LMSTUDIO_HOST") };
+            }
+
+            if let Some(path) = &self.old_path {
+                unsafe { std::env::set_var("PATH", path) };
+            } else {
+                unsafe { std::env::remove_var("PATH") };
+            }
+        }
+    }
+
+    #[derive(Clone)]
+    struct MockHttpResponse {
+        status: u16,
+        body: String,
+        content_type: &'static str,
+    }
+
+    impl MockHttpResponse {
+        fn json(status: u16, body: &str) -> Self {
+            Self {
+                status,
+                body: body.to_string(),
+                content_type: "application/json",
+            }
+        }
+
+        fn text(status: u16, body: &str) -> Self {
+            Self {
+                status,
+                body: body.to_string(),
+                content_type: "text/plain",
+            }
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct RecordedRequest {
+        method: String,
+        path: String,
+        body: String,
+    }
+
+    struct MockLmStudioServer {
+        addr: std::net::SocketAddr,
+        requests: Arc<Mutex<Vec<RecordedRequest>>>,
+        stop_tx: Option<mpsc::Sender<()>>,
+        handle: Option<thread::JoinHandle<()>>,
+    }
+
+    impl MockLmStudioServer {
+        fn start(routes: Vec<(String, Vec<MockHttpResponse>)>) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("should bind test server");
+            listener
+                .set_nonblocking(true)
+                .expect("should set nonblocking");
+            let addr = listener.local_addr().expect("should have local addr");
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let routes = Arc::new(Mutex::new(
+                routes
+                    .into_iter()
+                    .map(|(path, responses)| (path, VecDeque::from(responses)))
+                    .collect::<HashMap<_, _>>(),
+            ));
+            let requests_clone = Arc::clone(&requests);
+            let routes_clone = Arc::clone(&routes);
+            let (stop_tx, stop_rx) = mpsc::channel();
+
+            let handle = thread::spawn(move || loop {
+                if stop_rx.try_recv().is_ok() {
+                    break;
+                }
+
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        if let Some(request) = read_mock_request(&mut stream) {
+                            requests_clone
+                                .lock()
+                                .expect("requests lock")
+                                .push(request.clone());
+                            let key = format!("{} {}", request.method, request.path);
+                            let response = {
+                                let mut routes = routes_clone.lock().expect("routes lock");
+                                if let Some(queue) = routes.get_mut(&key) {
+                                    if queue.len() > 1 {
+                                        queue.pop_front().expect("queued response")
+                                    } else {
+                                        queue.front().cloned().expect("sticky response")
+                                    }
+                                } else {
+                                    MockHttpResponse::text(404, "not found")
+                                }
+                            };
+                            write_mock_response(&mut stream, &response);
+                        }
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(_) => break,
+                }
+            });
+
+            Self {
+                addr,
+                requests,
+                stop_tx: Some(stop_tx),
+                handle: Some(handle),
+            }
+        }
+
+        fn base_url(&self) -> String {
+            format!("http://{}", self.addr)
+        }
+
+        fn requests(&self) -> Vec<RecordedRequest> {
+            self.requests.lock().expect("requests lock").clone()
+        }
+    }
+
+    impl Drop for MockLmStudioServer {
+        fn drop(&mut self) {
+            if let Some(stop_tx) = self.stop_tx.take() {
+                let _ = stop_tx.send(());
+            }
+            if let Some(handle) = self.handle.take() {
+                let _ = handle.join();
+            }
+        }
+    }
+
+    fn read_mock_request(stream: &mut TcpStream) -> Option<RecordedRequest> {
+        let mut buffer = Vec::new();
+        let mut temp = [0_u8; 1024];
+        let header_end;
+        loop {
+            let read = stream.read(&mut temp).ok()?;
+            if read == 0 {
+                return None;
+            }
+            buffer.extend_from_slice(&temp[..read]);
+            if let Some(pos) = buffer.windows(4).position(|window| window == b"\r\n\r\n") {
+                header_end = pos + 4;
+                break;
+            }
+        }
+
+        let header_text = String::from_utf8_lossy(&buffer[..header_end]);
+        let mut lines = header_text.lines();
+        let request_line = lines.next()?.trim();
+        let mut parts = request_line.split_whitespace();
+        let method = parts.next()?.to_string();
+        let path = parts.next()?.to_string();
+
+        let content_length = header_text
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                if name.eq_ignore_ascii_case("content-length") {
+                    value.trim().parse::<usize>().ok()
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(0);
+
+        while buffer.len() < header_end + content_length {
+            let read = stream.read(&mut temp).ok()?;
+            if read == 0 {
+                break;
+            }
+            buffer.extend_from_slice(&temp[..read]);
+        }
+
+        let body = String::from_utf8_lossy(&buffer[header_end..header_end + content_length]).into();
+        Some(RecordedRequest { method, path, body })
+    }
+
+    fn write_mock_response(stream: &mut TcpStream, response: &MockHttpResponse) {
+        let status_text = match response.status {
+            200 => "OK",
+            404 => "Not Found",
+            500 => "Internal Server Error",
+            _ => "OK",
+        };
+        let raw = format!(
+            "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            response.status,
+            status_text,
+            response.content_type,
+            response.body.len(),
+            response.body,
+        );
+        stream
+            .write_all(raw.as_bytes())
+            .expect("should write mock response");
+        let _ = stream.flush();
+    }
+
+    struct FakeLmsCli {
+        dir: PathBuf,
+        log_path: PathBuf,
+    }
+
+    impl FakeLmsCli {
+        fn install(name: &str, server_start_success: bool, get_success: bool) -> Self {
+            Self::install_with_scripts(
+                name,
+                server_start_success,
+                if get_success {
+                    "exit 0"
+                } else {
+                    "echo 'cli get failed' >&2\nexit 1"
+                },
+                "[]",
+            )
+        }
+
+        fn install_with_get_script(
+            name: &str,
+            server_start_success: bool,
+            get_script: &str,
+        ) -> Self {
+            Self::install_with_scripts(name, server_start_success, get_script, "[]")
+        }
+
+        fn install_with_scripts(
+            name: &str,
+            server_start_success: bool,
+            get_script: &str,
+            ls_json: &str,
+        ) -> Self {
+            let dir = temp_dir(name);
+            let log_path = dir.join("lms.log");
+            let script_path = dir.join("lms");
+            let server_block = if server_start_success {
+                "exit 0"
+            } else {
+                "echo 'server start failed' >&2\nexit 1"
+            };
+            let script = format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{}\"\nif [ \"$1\" = \"ls\" ]; then\ncat <<'EOF'\n{}\nEOF\nexit 0\nfi\nif [ \"$1\" = \"server\" ] && [ \"$2\" = \"start\" ]; then\n{}\nfi\nif [ \"$1\" = \"get\" ]; then\n{}\nfi\necho 'unsupported args' >&2\nexit 1\n",
+                log_path.display(),
+                ls_json,
+                server_block,
+                get_script,
+            );
+            fs::write(&script_path, script).expect("should write fake lms script");
+            let mut perms = fs::metadata(&script_path)
+                .expect("script metadata")
+                .permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&script_path, perms).expect("set script perms");
+            Self { dir, log_path }
+        }
+
+        fn logged_commands(&self) -> Vec<String> {
+            match fs::read_to_string(&self.log_path) {
+                Ok(raw) => raw.lines().map(|line| line.to_string()).collect(),
+                Err(_) => Vec::new(),
+            }
+        }
+    }
+
+    fn test_specs() -> SystemSpecs {
+        SystemSpecs {
+            total_ram_gb: 64.0,
+            available_ram_gb: 48.0,
+            total_cpu_cores: 16,
+            cpu_name: "Test CPU".to_string(),
+            has_gpu: true,
+            gpu_vram_gb: Some(24.0),
+            total_gpu_vram_gb: Some(24.0),
+            gpu_name: Some("RTX 4090".to_string()),
+            gpu_count: 1,
+            unified_memory: false,
+            backend: GpuBackend::Cuda,
+            gpus: vec![],
+            cluster_mode: false,
+            cluster_node_count: 0,
+        }
+    }
+
+    fn test_app_with_model(model_name: &str, gguf_sources: Vec<GgufSource>) -> App {
+        let (download_capability_tx, download_capability_rx) = mpsc::channel();
+        let (catalog_refresh_tx, catalog_refresh_rx) = mpsc::channel();
+        App {
+            should_quit: false,
+            input_mode: super::InputMode::Normal,
+            search_query: String::new(),
+            cursor_position: 0,
+            specs: test_specs(),
+            source_models: vec![],
+            base_context_limit: None,
+            all_fits: vec![ModelFit {
+                model: LlmModel {
+                    name: model_name.to_string(),
+                    provider: "huggingface".to_string(),
+                    parameter_count: "3B".to_string(),
+                    parameters_raw: Some(3_000_000_000),
+                    min_ram_gb: 2.0,
+                    recommended_ram_gb: 4.0,
+                    min_vram_gb: Some(2.0),
+                    quantization: "Q4_K_M".to_string(),
+                    context_length: 32_768,
+                    use_case: "general".to_string(),
+                    is_moe: false,
+                    num_experts: None,
+                    active_experts: None,
+                    active_parameters: None,
+                    release_date: None,
+                    gguf_sources,
+                    capabilities: vec![],
+                    format: ModelFormat::Gguf,
+                    num_attention_heads: None,
+                    num_key_value_heads: None,
+                    metadata_overlay: None,
+                },
+                fit_level: FitLevel::Good,
+                run_mode: RunMode::Gpu,
+                memory_required_gb: 2.0,
+                memory_available_gb: 24.0,
+                utilization_pct: 10.0,
+                notes: vec![],
+                moe_offloaded_gb: None,
+                score: 90.0,
+                score_components: ScoreComponents {
+                    quality: 90.0,
+                    speed: 80.0,
+                    fit: 95.0,
+                    context: 85.0,
+                },
+                estimated_tps: 42.0,
+                best_quant: "Q4_K_M".to_string(),
+                use_case: UseCase::General,
+                runtime: InferenceRuntime::LlamaCpp,
+                installed: false,
+            }],
+            filtered_fits: vec![],
+            providers: vec![],
+            selected_providers: vec![],
+            use_cases: vec![],
+            selected_use_cases: vec![],
+            capabilities: vec![],
+            selected_capabilities: vec![],
+            fit_filter: super::FitFilter::All,
+            runtime_filter: RuntimeFilter::Any,
+            availability_filter: super::AvailabilityFilter::All,
+            tp_filter: super::TpFilter::All,
+            context_filter: super::ContextFilter::All,
+            installed_first: false,
+            sort_column: llmfit_core::fit::SortColumn::Score,
+            sort_ascending: false,
+            selected_row: 0,
+            show_detail: false,
+            show_compare: false,
+            compare_mark_model: None,
+            show_multi_compare: false,
+            compare_models: vec![],
+            compare_scroll: 0,
+            show_plan: false,
+            plan_model_idx: None,
+            plan_field: super::PlanField::Context,
+            plan_context_input: String::new(),
+            plan_quant_input: String::new(),
+            plan_target_tps_input: String::new(),
+            plan_cursor_position: 0,
+            plan_estimate: None,
+            plan_error: None,
+            provider_cursor: 0,
+            use_case_cursor: 0,
+            capability_cursor: 0,
+            download_provider_cursor: 0,
+            download_provider_options: vec![],
+            download_provider_model: None,
+            ollama_available: false,
+            ollama_binary_available: false,
+            ollama_installed: HashSet::new(),
+            ollama_installed_count: 0,
+            ollama: llmfit_core::providers::OllamaProvider::new(),
+            mlx_available: false,
+            mlx_installed: HashSet::new(),
+            mlx: llmfit_core::providers::MlxProvider::new(),
+            llamacpp_available: false,
+            llamacpp_installed: HashSet::new(),
+            llamacpp_installed_count: 0,
+            llamacpp_detection_hint: String::new(),
+            llamacpp: llmfit_core::providers::LlamaCppProvider::new(),
+            docker_mr_available: false,
+            docker_mr_installed: HashSet::new(),
+            docker_mr_installed_count: 0,
+            docker_mr: llmfit_core::providers::DockerModelRunnerProvider::new(),
+            lmstudio_available: true,
+            lmstudio_installed: HashSet::new(),
+            lmstudio_installed_count: 0,
+            lmstudio: llmfit_core::providers::LmStudioProvider::new(),
+            vllm_available: false,
+            vllm_installed: HashSet::new(),
+            vllm_installed_count: 0,
+            vllm: llmfit_core::providers::VllmProvider::new(),
+            pull_active: None,
+            pull_status: None,
+            pull_percent: None,
+            pull_model_name: None,
+            pull_provider: None,
+            download_capabilities: HashMap::new(),
+            download_capability_inflight: HashSet::new(),
+            download_capability_tx,
+            download_capability_rx,
+            catalog_refresh_active: false,
+            catalog_refresh_tx,
+            catalog_refresh_rx,
+            tick_count: 0,
+            confirm_download: false,
+            visual_anchor: None,
+            select_column: 2,
+            quants: vec![],
+            selected_quants: vec![],
+            quant_cursor: 0,
+            run_modes: vec![],
+            selected_run_modes: vec![],
+            run_mode_cursor: 0,
+            params_buckets: vec![],
+            selected_params_buckets: vec![],
+            params_bucket_cursor: 0,
+            theme: crate::theme::Theme::Default,
+            backend_hidden_count: 0,
+        }
+    }
+
+    fn wait_for_pull_completion(app: &mut App) -> String {
+        let start = Instant::now();
+        loop {
+            app.tick_pull();
+            if app.pull_active.is_none() {
+                return app.pull_status.clone().unwrap_or_default();
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(5),
+                "timed out waiting for pull completion: {:?}",
+                app.pull_status
+            );
+            thread::sleep(Duration::from_millis(25));
+        }
+    }
+
+    #[test]
+    fn lmstudio_download_picker_opens_from_tui_flow() {
+        let _env_lock = take_env_lock();
+        let server = MockLmStudioServer::start(vec![(
+            "GET /v1/models".to_string(),
+            vec![MockHttpResponse::json(200, r#"{"models":[]}"#)],
+        )]);
+        let _env = EnvGuard::install(Some(&server.base_url()), None);
+
+        let mut app = test_app_with_model(
+            "HuggingFaceTB/SmolLM3-3B",
+            vec![GgufSource {
+                repo: "lmstudio-community/SmolLM3-3B-GGUF".to_string(),
+                provider: "lmstudio-community".to_string(),
+            }],
+        );
+        app.filtered_fits = vec![0];
+
+        app.start_download();
+
+        assert_eq!(app.input_mode, super::InputMode::DownloadProviderPopup);
+        assert_eq!(app.download_provider_options, vec![super::DownloadProvider::LmStudio]);
+        assert_eq!(
+            app.download_provider_model.as_deref(),
+            Some("HuggingFaceTB/SmolLM3-3B")
+        );
+    }
+
+    #[test]
+    fn lmstudio_tui_flow_download_succeeds_via_http() {
+        let _env_lock = take_env_lock();
+        let server = MockLmStudioServer::start(vec![
+            (
+                "GET /v1/models".to_string(),
+                vec![
+                    MockHttpResponse::json(200, r#"{"models":[]}"#),
+                    MockHttpResponse::json(
+                        200,
+                        r#"{"models":[{"key":"lmstudio-community/smollm3-3b-gguf"}]}"#,
+                    ),
+                ],
+            ),
+            (
+                "POST /api/v1/models/download".to_string(),
+                vec![MockHttpResponse::json(
+                    200,
+                    r#"{"status":"downloading","job_id":"job-1","total_size_bytes":1000000,"started_at":"2025-01-01T00:00:00Z"}"#,
+                )],
+            ),
+            (
+                "GET /api/v1/models/download/status/job-1".to_string(),
+                vec![
+                    MockHttpResponse::json(
+                        200,
+                        r#"{"job_id":"job-1","status":"downloading","total_size_bytes":1000000,"downloaded_bytes":500000}"#,
+                    ),
+                    MockHttpResponse::json(
+                        200,
+                        r#"{"job_id":"job-1","status":"completed","total_size_bytes":1000000,"downloaded_bytes":1000000,"completed_at":"2025-01-01T00:01:00Z"}"#,
+                    ),
+                ],
+            ),
+        ]);
+        let _env = EnvGuard::install(Some(&server.base_url()), None);
+
+        let mut app = test_app_with_model(
+            "HuggingFaceTB/SmolLM3-3B",
+            vec![GgufSource {
+                repo: "lmstudio-community/SmolLM3-3B-GGUF".to_string(),
+                provider: "lmstudio-community".to_string(),
+            }],
+        );
+
+        app.start_lmstudio_download("HuggingFaceTB/SmolLM3-3B".to_string());
+        let final_status = wait_for_pull_completion(&mut app);
+
+        assert_eq!(final_status, "Download complete via LM Studio!");
+        assert!(app.lmstudio_available);
+        let requests = server.requests();
+        assert!(requests.iter().any(|req| req.method == "POST" && req.path == "/api/v1/models/download" && req.body.contains("lmstudio-community/SmolLM3-3B-GGUF")));
+        assert!(requests.iter().any(|req| req.method == "GET" && req.path == "/api/v1/models/download/status/job-1"));
+    }
+
+    #[test]
+    fn tick_pull_clears_seeded_lmstudio_zero_percent_when_progress_is_unknown() {
+        let mut app = test_app_with_model("smollm3-3b-gguf", vec![]);
+        let (tx, rx) = mpsc::channel();
+        app.pull_active = Some(llmfit_core::providers::PullHandle {
+            model_tag: "smollm3-3b-gguf".to_string(),
+            receiver: rx,
+        });
+        app.pull_percent = Some(0.0);
+        app.pull_status = Some("Downloading smollm3-3b-gguf via LM Studio (downloading)".to_string());
+
+        tx.send(llmfit_core::providers::PullEvent::Progress {
+            status: "Downloading smollm3-3b-gguf via LM Studio (waiting for progress...)"
+                .to_string(),
+            percent: None,
+        })
+        .expect("should send progress event");
+
+        app.tick_pull();
+
+        assert_eq!(app.pull_percent, None);
+        assert_eq!(
+            app.pull_status.as_deref(),
+            Some("Downloading smollm3-3b-gguf via LM Studio (waiting for progress...)")
+        );
+    }
+
+    #[test]
+    fn lmstudio_tui_flow_handles_already_downloaded() {
+        let _env_lock = take_env_lock();
+        let server = MockLmStudioServer::start(vec![
+            (
+                "GET /v1/models".to_string(),
+                vec![
+                    MockHttpResponse::json(200, r#"{"models":[]}"#),
+                    MockHttpResponse::json(200, r#"{"models":[{"key":"smollm3-3b-gguf"}]}"#),
+                ],
+            ),
+            (
+                "POST /api/v1/models/download".to_string(),
+                vec![MockHttpResponse::json(200, r#"{"status":"already_downloaded"}"#)],
+            ),
+        ]);
+        let _env = EnvGuard::install(Some(&server.base_url()), None);
+
+        let mut app = test_app_with_model("smollm3-3b-gguf", vec![]);
+
+        app.start_lmstudio_download("smollm3-3b-gguf".to_string());
+        let final_status = wait_for_pull_completion(&mut app);
+
+        assert_eq!(final_status, "Download complete via LM Studio!");
+        assert!(app.lmstudio_installed.contains("smollm3-3b-gguf"));
+    }
+
+    #[test]
+    fn lmstudio_tui_flow_falls_back_to_cli_after_http_404() {
+        let _env_lock = take_env_lock();
+        let fake_cli = FakeLmsCli::install("lmstudio-cli-success", true, true);
+        let server = MockLmStudioServer::start(vec![
+            (
+                "GET /v1/models".to_string(),
+                vec![
+                    MockHttpResponse::json(200, r#"{"models":[]}"#),
+                    MockHttpResponse::json(
+                        200,
+                        r#"{"models":[{"key":"lmstudio-community/smollm3-3b-gguf"}]}"#,
+                    ),
+                ],
+            ),
+            (
+                "POST /api/v1/models/download".to_string(),
+                vec![MockHttpResponse::text(404, "missing")],
+            ),
+        ]);
+        let _env = EnvGuard::install(Some(&server.base_url()), Some(&fake_cli.dir));
+
+        let mut app = test_app_with_model(
+            "HuggingFaceTB/SmolLM3-3B",
+            vec![GgufSource {
+                repo: "lmstudio-community/SmolLM3-3B-GGUF".to_string(),
+                provider: "lmstudio-community".to_string(),
+            }],
+        );
+
+        app.start_lmstudio_download("HuggingFaceTB/SmolLM3-3B".to_string());
+        let final_status = wait_for_pull_completion(&mut app);
+
+        assert_eq!(final_status, "Download complete via LM Studio!");
+        let commands = fake_cli.logged_commands();
+        assert!(commands.iter().any(|cmd| cmd == "get SmolLM3-3B-GGUF --yes"));
+    }
+
+    #[test]
+    fn lmstudio_tui_flow_reports_cli_failure_after_http_404() {
+        let _env_lock = take_env_lock();
+        let fake_cli = FakeLmsCli::install("lmstudio-cli-fail", true, false);
+        let server = MockLmStudioServer::start(vec![
+            (
+                "GET /v1/models".to_string(),
+                vec![MockHttpResponse::json(200, r#"{"models":[]}"#)],
+            ),
+            (
+                "POST /api/v1/models/download".to_string(),
+                vec![MockHttpResponse::text(404, "missing")],
+            ),
+        ]);
+        let _env = EnvGuard::install(Some(&server.base_url()), Some(&fake_cli.dir));
+
+        let mut app = test_app_with_model(
+            "HuggingFaceTB/SmolLM3-3B",
+            vec![GgufSource {
+                repo: "lmstudio-community/SmolLM3-3B-GGUF".to_string(),
+                provider: "lmstudio-community".to_string(),
+            }],
+        );
+
+        app.start_lmstudio_download("HuggingFaceTB/SmolLM3-3B".to_string());
+        let final_status = wait_for_pull_completion(&mut app);
+
+        assert!(final_status.contains("CLI fallback failed"));
+        let commands = fake_cli.logged_commands();
+        assert!(commands.iter().any(|cmd| cmd == "get SmolLM3-3B-GGUF --yes"));
+    }
+
+    #[test]
+    fn lmstudio_tui_flow_uses_direct_cli_when_api_unavailable_for_native_key() {
+        let _env_lock = take_env_lock();
+        let fake_cli = FakeLmsCli::install_with_scripts(
+            "lmstudio-cli-direct",
+            false,
+            "exit 0",
+            r#"[{"modelKey":"smollm3-3b-gguf"}]"#,
+        );
+        let _env = EnvGuard::install(Some("http://127.0.0.1:9"), Some(&fake_cli.dir));
+
+        let mut app = test_app_with_model("smollm3-3b-gguf", vec![]);
+
+        app.start_lmstudio_download("smollm3-3b-gguf".to_string());
+        let final_status = wait_for_pull_completion(&mut app);
+
+        assert_eq!(final_status, "Download complete via LM Studio!");
+        let commands = fake_cli.logged_commands();
+        assert!(commands.iter().any(|cmd| cmd == "server start"));
+        assert!(commands.iter().any(|cmd| cmd == "get smollm3-3b-gguf --yes"));
+    }
+
+    #[test]
+    fn lmstudio_done_requires_installed_model_match_before_reporting_success() {
+        let _env_lock = take_env_lock();
+        let server = MockLmStudioServer::start(vec![
+            (
+                "GET /v1/models".to_string(),
+                vec![
+                    MockHttpResponse::json(200, r#"{"models":[]}"#),
+                    MockHttpResponse::json(
+                        200,
+                        r#"{"models":[{"key":"lmstudio-community/smollm3-3b-gguf"}]}"#,
+                    ),
+                ],
+            ),
+            (
+                "POST /api/v1/models/download".to_string(),
+                vec![MockHttpResponse::json(200, r#"{"status":"already_downloaded"}"#)],
+            ),
+        ]);
+        let _env = EnvGuard::install(Some(&server.base_url()), None);
+
+        let mut app = test_app_with_model("microsoft/Phi-4-reasoning", vec![]);
+
+        app.start_lmstudio_download("microsoft/Phi-4-reasoning".to_string());
+        let final_status = wait_for_pull_completion(&mut app);
+
+        assert_eq!(
+            final_status,
+            "LM Studio reported completion, but 'microsoft/Phi-4-reasoning' is not installed yet"
+        );
+    }
+
+    #[test]
+    fn lmstudio_cli_fallback_emits_live_activity_updates() {
+        let _env_lock = take_env_lock();
+        let fake_cli = FakeLmsCli::install_with_scripts(
+            "lmstudio-cli-progress",
+            false,
+            "printf 'Resolving model\\n'; sleep 0.2; printf 'Downloading shard 1/3\\n'; sleep 0.2; printf 'Downloading shard 2/3\\n'; sleep 0.2; exit 0",
+            r#"[{"modelKey":"smollm3-3b-gguf"}]"#,
+        );
+        let _env = EnvGuard::install(Some("http://127.0.0.1:9"), Some(&fake_cli.dir));
+
+        let mut app = test_app_with_model("smollm3-3b-gguf", vec![]);
+
+        app.start_lmstudio_download("smollm3-3b-gguf".to_string());
+
+        let start = Instant::now();
+        let mut saw_cli_activity = false;
+        while start.elapsed() < Duration::from_secs(3) {
+            app.tick_pull();
+            if app
+                .pull_status
+                .as_deref()
+                .is_some_and(|status| status.contains("LM Studio CLI: Downloading shard 1/3"))
+            {
+                saw_cli_activity = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+
+        assert!(saw_cli_activity, "expected streamed CLI activity update");
+        let final_status = wait_for_pull_completion(&mut app);
+        assert!(
+            final_status == "Download complete via LM Studio!"
+                || final_status
+                    == "LM Studio reported completion, but 'HuggingFaceTB/SmolLM3-3B' is not installed yet"
+        );
+    }
+
+    #[test]
+    fn lmstudio_cli_fallback_emits_numeric_progress_from_carriage_return_updates() {
+        let _env_lock = take_env_lock();
+        let fake_cli = FakeLmsCli::install_with_scripts(
+            "lmstudio-cli-percent-progress",
+            true,
+            "i=0; while [ $i -lt 6 ]; do printf '\r⠋ [████████████▌         ]  57.23%% |  2.67 GB /  4.68 GB |  45.12 MB/s | ETA 00:43\r'; sleep 0.2; i=$((i+1)); done; printf '⠙ [██████████████████████] 100.00%% |  4.68 GB /  4.68 GB |  51.00 MB/s | ETA 00:00\n'; exit 0",
+            r#"[{"modelKey":"smollm3-3b-gguf"}]"#,
+        );
+        let server = MockLmStudioServer::start(vec![
+            (
+                "GET /v1/models".to_string(),
+                vec![MockHttpResponse::json(200, r#"{"models":[]}"#)],
+            ),
+            (
+                "POST /api/v1/models/download".to_string(),
+                vec![MockHttpResponse::text(404, "missing")],
+            ),
+        ]);
+        let _env = EnvGuard::install(Some(&server.base_url()), Some(&fake_cli.dir));
+
+        let mut app = test_app_with_model(
+            "HuggingFaceTB/SmolLM3-3B",
+            vec![GgufSource {
+                repo: "lmstudio-community/SmolLM3-3B-GGUF".to_string(),
+                provider: "lmstudio-community".to_string(),
+            }],
+        );
+
+        app.start_lmstudio_download("HuggingFaceTB/SmolLM3-3B".to_string());
+
+        let start = Instant::now();
+        let mut saw_numeric_progress = false;
+        while start.elapsed() < Duration::from_secs(5) {
+            let Some(handle) = app.pull_active.as_ref() else {
+                break;
+            };
+
+            match handle.receiver.try_recv() {
+                Ok(llmfit_core::providers::PullEvent::Progress { status, percent }) => {
+                    if percent.is_some_and(|pct| (pct - 57.23).abs() < 0.01)
+                        && status.contains("57.23%")
+                    {
+                        saw_numeric_progress = true;
+                        break;
+                    }
+                }
+                Ok(_) => {}
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => break,
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+
+        assert!(
+            saw_numeric_progress,
+            "expected streamed CLI percent update from carriage-return progress bar"
+        );
+    }
+
+    #[test]
+    fn tick_pull_applies_numeric_progress_event() {
+        let mut app = test_app_with_model("smollm3-3b-gguf", vec![]);
+        let (tx, rx) = mpsc::channel();
+        app.pull_active = Some(llmfit_core::providers::PullHandle {
+            model_tag: "smollm3-3b-gguf".to_string(),
+            receiver: rx,
+        });
+
+        tx.send(llmfit_core::providers::PullEvent::Progress {
+            status: "LM Studio CLI: ⠋ [████████████▌         ]  57.23% |  2.67 GB /  4.68 GB |  45.12 MB/s | ETA 00:43".to_string(),
+            percent: Some(57.23),
+        })
+        .expect("should send progress event");
+
+        app.tick_pull();
+
+        assert_eq!(app.pull_status.as_deref(), Some("LM Studio CLI: ⠋ [████████████▌         ]  57.23% |  2.67 GB /  4.68 GB |  45.12 MB/s | ETA 00:43"));
+        assert!(app.pull_percent.is_some_and(|pct| (pct - 57.23).abs() < 0.01));
+    }
+
+    #[test]
+    fn tick_pull_clears_stale_percent_when_progress_event_has_no_percent() {
+        let mut app = test_app_with_model("smollm3-3b-gguf", vec![]);
+        let (tx, rx) = mpsc::channel();
+        app.pull_active = Some(llmfit_core::providers::PullHandle {
+            model_tag: "smollm3-3b-gguf".to_string(),
+            receiver: rx,
+        });
+        app.pull_percent = Some(0.0);
+        app.pull_status = Some("Downloading via LM Studio (downloading)".to_string());
+
+        tx.send(llmfit_core::providers::PullEvent::Progress {
+            status: "LM Studio API unavailable (http status: 404); falling back to CLI (gemma-3n-E2B-it)".to_string(),
+            percent: None,
+        })
+        .expect("should send progress event");
+
+        app.tick_pull();
+
+        assert_eq!(
+            app.pull_status.as_deref(),
+            Some("LM Studio API unavailable (http status: 404); falling back to CLI (gemma-3n-E2B-it)")
+        );
+        assert_eq!(app.pull_percent, None);
     }
 
     #[test]
@@ -3135,6 +4069,7 @@ mod tests {
                 format: ModelFormat::Safetensors,
                 num_attention_heads: None,
                 num_key_value_heads: None,
+                metadata_overlay: None,
             },
             fit_level: FitLevel::Good,
             run_mode: RunMode::Gpu,
@@ -3303,6 +4238,7 @@ mod tests {
                 format: ModelFormat::Safetensors,
                 num_attention_heads: None,
                 num_key_value_heads: None,
+                metadata_overlay: None,
             },
             fit_level: FitLevel::Good,
             run_mode: RunMode::Gpu,
@@ -3472,6 +4408,7 @@ mod tests {
                 format: ModelFormat::Gguf,
                 num_attention_heads: None,
                 num_key_value_heads: None,
+                metadata_overlay: None,
             },
             fit_level: FitLevel::Good,
             run_mode: RunMode::Gpu,
@@ -3495,5 +4432,95 @@ mod tests {
         };
 
         assert!(app.runtime_filter_matches_fit(&fit));
+    }
+
+    #[test]
+    fn lmstudio_download_prefers_catalog_lmstudio_repo() {
+        let mut app = App::with_specs_and_context(
+            SystemSpecs {
+                total_ram_gb: 64.0,
+                available_ram_gb: 48.0,
+                total_cpu_cores: 16,
+                cpu_name: "Test CPU".to_string(),
+                has_gpu: true,
+                gpu_vram_gb: Some(24.0),
+                total_gpu_vram_gb: Some(24.0),
+                gpu_name: Some("RTX 4090".to_string()),
+                gpu_count: 1,
+                unified_memory: false,
+                backend: GpuBackend::Cuda,
+                gpus: vec![],
+                cluster_mode: false,
+                cluster_node_count: 0,
+            },
+            None,
+        );
+
+        app.all_fits = vec![ModelFit {
+            model: LlmModel {
+                name: "HuggingFaceTB/SmolLM3-3B".to_string(),
+                provider: "huggingface".to_string(),
+                parameter_count: "3B".to_string(),
+                parameters_raw: Some(3_000_000_000),
+                min_ram_gb: 2.0,
+                recommended_ram_gb: 4.0,
+                min_vram_gb: Some(2.0),
+                quantization: "Q4_K_M".to_string(),
+                context_length: 65_536,
+                use_case: "general".to_string(),
+                is_moe: false,
+                num_experts: None,
+                active_experts: None,
+                active_parameters: None,
+                release_date: None,
+                gguf_sources: vec![
+                    llmfit_core::models::GgufSource {
+                        repo: "unsloth/SmolLM3-3B-GGUF".to_string(),
+                        provider: "unsloth".to_string(),
+                    },
+                    llmfit_core::models::GgufSource {
+                        repo: "lmstudio-community/SmolLM3-3B-GGUF".to_string(),
+                        provider: "lmstudio-community".to_string(),
+                    },
+                ],
+                capabilities: vec![],
+                format: ModelFormat::Gguf,
+                num_attention_heads: None,
+                num_key_value_heads: None,
+                metadata_overlay: None,
+            },
+            fit_level: FitLevel::Good,
+            run_mode: RunMode::Gpu,
+            memory_required_gb: 2.0,
+            memory_available_gb: 24.0,
+            utilization_pct: 10.0,
+            notes: vec![],
+            moe_offloaded_gb: None,
+            score: 90.0,
+            score_components: ScoreComponents {
+                quality: 90.0,
+                speed: 80.0,
+                fit: 95.0,
+                context: 85.0,
+            },
+            estimated_tps: 42.0,
+            best_quant: "Q4_K_M".to_string(),
+            use_case: UseCase::General,
+            runtime: InferenceRuntime::LlamaCpp,
+            installed: false,
+        }];
+
+        assert_eq!(
+            app.lmstudio_download_candidates("HuggingFaceTB/SmolLM3-3B"),
+            vec![
+                "lmstudio-community/SmolLM3-3B-GGUF".to_string(),
+                "https://huggingface.co/lmstudio-community/SmolLM3-3B-GGUF".to_string(),
+                "SmolLM3-3B-GGUF".to_string(),
+                "huggingfacetb/smollm3-3b".to_string(),
+                "smollm3-3b".to_string(),
+                "unsloth/SmolLM3-3B-GGUF".to_string(),
+                "https://huggingface.co/unsloth/SmolLM3-3B-GGUF".to_string(),
+            ]
+        );
     }
 }

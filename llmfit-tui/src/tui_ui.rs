@@ -34,7 +34,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             Constraint::Length(4), // system info bar (2 rows)
             Constraint::Length(3), // search + filters
             Constraint::Min(10),   // main table
-            Constraint::Length(1), // status bar
+            Constraint::Length(2), // status bar
         ])
         .split(frame.area());
 
@@ -270,6 +270,7 @@ fn draw_search_and_filters(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeC
             Constraint::Length(16), // provider summary
             Constraint::Length(14), // use-case summary
             Constraint::Length(12), // capability summary
+            Constraint::Length(12),
             Constraint::Length(14), // sort column
             Constraint::Length(14), // fit filter
             Constraint::Length(14),
@@ -408,6 +409,34 @@ fn draw_search_and_filters(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeC
     .block(cap_block);
     frame.render_widget(caps, chunks[3]);
 
+    let active_quant_count = app.selected_quants.iter().filter(|&&s| s).count();
+    let total_quant_count = app.quants.len();
+    let quant_text = if active_quant_count == total_quant_count {
+        "All".to_string()
+    } else {
+        format!("{}/{}", active_quant_count, total_quant_count)
+    };
+    let quant_color = if active_quant_count == total_quant_count {
+        tc.good
+    } else if active_quant_count == 0 {
+        tc.error
+    } else {
+        tc.warning
+    };
+
+    let quant_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(tc.border))
+        .title(" Quant (Q) ")
+        .title_style(Style::default().fg(tc.muted));
+
+    let quants = Paragraph::new(Line::from(Span::styled(
+        format!(" {}", quant_text),
+        Style::default().fg(quant_color),
+    )))
+    .block(quant_block);
+    frame.render_widget(quants, chunks[4]);
+
     // Sort column
     let sort_block = Block::default()
         .borders(Borders::ALL)
@@ -420,7 +449,7 @@ fn draw_search_and_filters(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeC
         Style::default().fg(tc.accent),
     )))
     .block(sort_block);
-    frame.render_widget(sort_text, chunks[4]);
+    frame.render_widget(sort_text, chunks[5]);
 
     // Fit filter
     let fit_style = match app.fit_filter {
@@ -440,7 +469,7 @@ fn draw_search_and_filters(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeC
 
     let fit_text = Paragraph::new(Line::from(Span::styled(app.fit_filter.label(), fit_style)))
         .block(fit_block);
-    frame.render_widget(fit_text, chunks[5]);
+    frame.render_widget(fit_text, chunks[6]);
 
     let runtime_style = match app.runtime_filter {
         RuntimeFilter::Any => Style::default().fg(tc.fg),
@@ -461,7 +490,7 @@ fn draw_search_and_filters(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeC
         runtime_style,
     )))
     .block(runtime_block);
-    frame.render_widget(runtime_text, chunks[6]);
+    frame.render_widget(runtime_text, chunks[7]);
 
     // Availability filter
     let avail_style = match app.availability_filter {
@@ -481,7 +510,7 @@ fn draw_search_and_filters(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeC
         avail_style,
     )))
     .block(avail_block);
-    frame.render_widget(avail_text, chunks[7]);
+    frame.render_widget(avail_text, chunks[8]);
 
     // TP filter
     use crate::tui_app::TpFilter;
@@ -496,7 +525,7 @@ fn draw_search_and_filters(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeC
         .title_style(Style::default().fg(tc.muted));
     let tp_text =
         Paragraph::new(Line::from(Span::styled(app.tp_filter.label(), tp_style))).block(tp_block);
-    frame.render_widget(tp_text, chunks[8]);
+    frame.render_widget(tp_text, chunks[9]);
 
     // Context filter
     use crate::tui_app::ContextFilter;
@@ -514,7 +543,7 @@ fn draw_search_and_filters(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeC
         context_style,
     )))
     .block(context_block);
-    frame.render_widget(context_text, chunks[9]);
+    frame.render_widget(context_text, chunks[10]);
 
     // Theme indicator
     let theme_block = Block::default()
@@ -528,7 +557,7 @@ fn draw_search_and_filters(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeC
         Style::default().fg(tc.info),
     )))
     .block(theme_block);
-    frame.render_widget(theme_text, chunks[10]);
+    frame.render_widget(theme_text, chunks[11]);
 }
 
 fn fit_color(level: FitLevel, tc: &ThemeColors) -> Color {
@@ -728,7 +757,7 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect, tc: &ThemeColors) {
                 Cell::from(fit.run_mode_text().to_string()).style(Style::default().fg(mode_color)),
                 Cell::from(format!("{:.0}%", fit.utilization_pct))
                     .style(Style::default().fg(color)),
-                Cell::from(format_context_length(fit.model.context_length))
+                Cell::from(format_context_length(fit.model.effective_context_length()))
                     .style(Style::default().fg(tc.muted)),
                 Cell::from(
                     fit.model
@@ -865,7 +894,9 @@ fn draw_compare(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
     let tps_delta = right.estimated_tps - left.estimated_tps;
     let mem_delta = right.utilization_pct - left.utilization_pct;
     let params_delta = right.model.params_b() - left.model.params_b();
-    let ctx_delta = right.model.context_length as i64 - left.model.context_length as i64;
+    let left_context = left.model.effective_context_length();
+    let right_context = right.model.effective_context_length();
+    let ctx_delta = right_context as i64 - left_context as i64;
 
     let score_hint = if score_delta > 0.05 {
         " ↑"
@@ -940,7 +971,7 @@ fn draw_compare(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
         mem_style: Style::default().fg(fit_color(left.fit_level, tc)),
         params: left.model.parameter_count.clone(),
         params_style: Style::default().fg(tc.fg),
-        context: format!(" {} tokens", left.model.context_length),
+        context: format!(" {} tokens", left_context),
         context_style: Style::default().fg(tc.fg),
     };
 
@@ -959,10 +990,7 @@ fn draw_compare(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
             right.model.parameter_count, params_delta, params_hint
         ),
         params_style,
-        context: format!(
-            " {} tokens ({:+}){}",
-            right.model.context_length, ctx_delta, ctx_hint
-        ),
+        context: format!(" {} tokens ({:+}){}", right_context, ctx_delta, ctx_hint),
         context_style: ctx_style,
     };
 
@@ -1180,7 +1208,7 @@ fn draw_multi_compare(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors
         .fold(f64::MAX, f64::min); // lower is better
     let best_ctx = models
         .iter()
-        .map(|m| m.model.context_length)
+        .map(|m| m.model.effective_context_length())
         .max()
         .unwrap_or(0);
 
@@ -1317,12 +1345,12 @@ fn draw_multi_compare(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors
         label: "Context",
         values: visible_models
             .iter()
-            .map(|m| format_context_length(m.model.context_length))
+            .map(|m| format_context_length(m.model.effective_context_length()))
             .collect(),
         styles: visible_models
             .iter()
             .map(|m| {
-                if m.model.context_length == best_ctx {
+                if m.model.effective_context_length() == best_ctx {
                     Style::default().fg(tc.good).add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(tc.muted)
@@ -1474,13 +1502,13 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
         Line::from(vec![
             Span::styled("  Context:     ", Style::default().fg(tc.muted)),
             Span::styled(
-                format!("{} tokens", fit.model.context_length),
+                format!("{} tokens", fit.model.effective_context_length()),
                 Style::default().fg(tc.fg),
             ),
         ]),
         Line::from(vec![
             Span::styled("  Use Case:    ", Style::default().fg(tc.muted)),
-            Span::styled(&fit.model.use_case, Style::default().fg(tc.fg)),
+            Span::styled(fit.model.effective_use_case(), Style::default().fg(tc.fg)),
         ]),
         Line::from(vec![
             Span::styled("  Category:    ", Style::default().fg(tc.muted)),
@@ -1489,18 +1517,20 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
         Line::from(vec![
             Span::styled("  Capabilities:", Style::default().fg(tc.muted)),
             Span::styled(
-                if fit.model.capabilities.is_empty() {
-                    " None".to_string()
-                } else {
-                    format!(
-                        " {}",
-                        fit.model
-                            .capabilities
-                            .iter()
-                            .map(|c| c.label())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    )
+                {
+                    let effective_capabilities = fit.model.effective_capabilities();
+                    if effective_capabilities.is_empty() {
+                        " None".to_string()
+                    } else {
+                        format!(
+                            " {}",
+                            effective_capabilities
+                                .iter()
+                                .map(|c| c.label())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
+                    }
                 },
                 Style::default().fg(tc.info),
             ),
@@ -2427,12 +2457,12 @@ fn draw_download_provider_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) 
     frame.render_widget(paragraph, popup_area);
 }
 
-fn status_keys_and_mode(app: &App) -> (String, String) {
+fn status_keys_and_mode(app: &App) -> (Vec<String>, String) {
     match app.input_mode {
         InputMode::Normal => {
             if app.show_multi_compare {
                 return (
-                    " ←/→/hl:scroll  q/Esc:close".to_string(),
+                    vec![" ←/→/hl:scroll  q/Esc:close".to_string()],
                     "COMPARE".to_string(),
                 );
             }
@@ -2460,20 +2490,26 @@ fn status_keys_and_mode(app: &App) -> (String, String) {
                 "  R:update models".to_string()
             };
             (
-                format!(
-                    " ↑↓/jk:nav  {}  /:search  f:fit  w:runtime  K:ctx  s:sort  Ctrl-R:reset  v:visual  V:select  t:theme  p:plan  m:mark  c:compare  x:clear mark  y:copy{}  P:providers  U:use cases  C:caps  q:quit  tok/s*:est",
-                    detail_key, ollama_keys,
-                ),
+                vec![
+                    format!(
+                        " ↑↓/jk:nav  {}  /:search  f:fit  w:runtime  K:ctx  s:sort  Ctrl-R:reset  v:visual  V:select  t:theme",
+                        detail_key,
+                    ),
+                    format!(
+                        " p:plan  m:mark  c:compare  x:clear mark  y:copy{}  P:providers  U:use cases  C:caps  Q:quants  q:quit  tok/s*:est",
+                        ollama_keys,
+                    ),
+                ],
                 "NORMAL".to_string(),
             )
         }
         InputMode::Visual => {
             let count = app.visual_selection_count();
             (
-                format!(
+                vec![format!(
                     " ↑↓/jk:extend  c:compare  m:mark  Esc:exit  ({} selected)",
                     count
-                ),
+                )],
                 "VISUAL".to_string(),
             )
         }
@@ -2484,45 +2520,50 @@ fn status_keys_and_mode(app: &App) -> (String, String) {
             ];
             let col_name = header_names.get(app.select_column).unwrap_or(&"");
             (
-                format!(" ←/→:column  ↑↓:nav  Enter:filter [{}]  Esc:exit", col_name),
+                vec![format!(
+                    " ←/→:column  ↑↓:nav  Enter:filter [{}]  Esc:exit",
+                    col_name
+                )],
                 "SELECT".to_string(),
             )
         }
         InputMode::Search => (
-            "  Type to search  Esc:done  Ctrl-U:clear".to_string(),
+            vec!["  Type to search  Esc:done  Ctrl-U:clear".to_string()],
             "SEARCH".to_string(),
         ),
         InputMode::Plan => (
-            "  Tab/jk:field  ←/→:cursor  type:edit  Backspace/Delete  Ctrl-U:clear  Esc:close"
-                .to_string(),
+            vec![
+                "  Tab/jk:field  ←/→:cursor  type:edit  Backspace/Delete  Ctrl-U:clear  Esc:close"
+                    .to_string(),
+            ],
             "PLAN".to_string(),
         ),
         InputMode::ProviderPopup => (
-            "  ↑↓/jk:navigate  Space:toggle  a:all/none  Esc:close".to_string(),
+            vec!["  ↑↓/jk:navigate  Space:toggle  a:all/none  Esc:close".to_string()],
             "PROVIDERS".to_string(),
         ),
         InputMode::UseCasePopup => (
-            "  ↑↓/jk:navigate  Space:toggle  a:all/none  Esc:close".to_string(),
+            vec!["  ↑↓/jk:navigate  Space:toggle  a:all/none  Esc:close".to_string()],
             "USE CASES".to_string(),
         ),
         InputMode::CapabilityPopup => (
-            "  ↑↓/jk:navigate  Space:toggle  a:all/none  Esc:close".to_string(),
+            vec!["  ↑↓/jk:navigate  Space:toggle  a:all/none  Esc:close".to_string()],
             "CAPABILITIES".to_string(),
         ),
         InputMode::DownloadProviderPopup => (
-            "  ↑↓/jk:choose  Enter:download  Esc:cancel".to_string(),
+            vec!["  ↑↓/jk:choose  Enter:download  Esc:cancel".to_string()],
             "DOWNLOAD".to_string(),
         ),
         InputMode::QuantPopup => (
-            "  ↑↓/jk:navigate  Space:toggle  a:all/none  Esc:close".to_string(),
+            vec!["  ↑↓/jk:navigate  Space:toggle  a:all/none  Esc:close".to_string()],
             "QUANT".to_string(),
         ),
         InputMode::RunModePopup => (
-            "  ↑↓/jk:navigate  Space:toggle  a:all/none  Esc:close".to_string(),
+            vec!["  ↑↓/jk:navigate  Space:toggle  a:all/none  Esc:close".to_string()],
             "RUN MODE".to_string(),
         ),
         InputMode::ParamsBucketPopup => (
-            "  ↑↓/jk:navigate  Space:toggle  a:all/none  Esc:close".to_string(),
+            vec!["  ↑↓/jk:navigate  Space:toggle  a:all/none  Esc:close".to_string()],
             "PARAMS".to_string(),
         ),
     }
@@ -2530,11 +2571,35 @@ fn status_keys_and_mode(app: &App) -> (String, String) {
 
 fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
     let (keys, mode_text) = status_keys_and_mode(app);
+    let status_text = Text::from(
+        keys.iter()
+            .enumerate()
+            .map(|(idx, line)| {
+                if idx == 0 {
+                    Line::from(vec![
+                        Span::styled(
+                            format!(" {} ", mode_text),
+                            Style::default().fg(tc.status_fg).bg(tc.status_bg).bold(),
+                        ),
+                        Span::styled(line.clone(), Style::default().fg(tc.muted)),
+                    ])
+                } else {
+                    Line::from(Span::styled(line.clone(), Style::default().fg(tc.muted)))
+                }
+            })
+            .collect::<Vec<_>>(),
+    );
 
     // If a download is in progress, show the progress bar
     if let Some(status) = &app.pull_status {
         let progress_text = if let Some(pct) = app.pull_percent {
             format!(" {} [{:.0}%] ", status, pct)
+        } else if app.pull_active.is_some() {
+            format!(
+                " {} {} ",
+                pull_indicator(None, app.tick_count).trim(),
+                status
+            )
         } else {
             format!(" {} ", status)
         };
@@ -2547,14 +2612,10 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
             ])
             .split(area);
 
-        let status_line = Line::from(vec![
-            Span::styled(
-                format!(" {} ", mode_text),
-                Style::default().fg(tc.status_fg).bg(tc.status_bg).bold(),
-            ),
-            Span::styled(keys, Style::default().fg(tc.muted)),
-        ]);
-        frame.render_widget(Paragraph::new(status_line), chunks[0]);
+        frame.render_widget(
+            Paragraph::new(status_text.clone()).wrap(Wrap { trim: false }),
+            chunks[0],
+        );
 
         let pull_color = if app.pull_active.is_some() {
             tc.warning
@@ -2571,15 +2632,7 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
         return;
     }
 
-    let status_line = Line::from(vec![
-        Span::styled(
-            format!(" {} ", mode_text),
-            Style::default().fg(tc.status_fg).bg(tc.status_bg).bold(),
-        ),
-        Span::styled(keys, Style::default().fg(tc.muted)),
-    ]);
-
-    frame.render_widget(Paragraph::new(status_line), area);
+    frame.render_widget(Paragraph::new(status_text).wrap(Wrap { trim: false }), area);
 }
 
 fn draw_quant_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {

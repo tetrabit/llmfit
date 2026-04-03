@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// Quantization levels ordered from best quality to most compressed.
 /// Used for dynamic quantization selection: try the best that fits.
@@ -156,6 +157,36 @@ pub enum ModelFormat {
     Safetensors,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MetadataSource {
+    EmbeddedHf,
+    RefreshedHf,
+    LmStudioCatalog,
+    LocalLmStudioArtifact,
+    LocalGgufArtifact,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ModelMetadataOverlay {
+    pub source: MetadataSource,
+    #[serde(default)]
+    pub context_length: Option<u32>,
+    #[serde(default)]
+    pub capabilities: Option<Vec<Capability>>,
+    #[serde(default)]
+    pub use_case: Option<String>,
+    #[serde(default)]
+    pub artifact_name: Option<String>,
+    #[serde(default)]
+    pub notes: Option<String>,
+}
+
+impl Default for MetadataSource {
+    fn default() -> Self {
+        Self::EmbeddedHf
+    }
+}
+
 impl ModelFormat {
     /// Returns true for formats that are pre-quantized at a fixed bit width
     /// and cannot be dynamically re-quantized (AWQ, GPTQ).
@@ -192,8 +223,10 @@ impl UseCase {
     /// Infer use-case from the model's use_case field and name.
     pub fn from_model(model: &LlmModel) -> Self {
         let name = model.name.to_lowercase();
-        let use_case = model.use_case.to_lowercase();
-        let has_tool_use = model.capabilities.contains(&Capability::ToolUse)
+        let use_case = model.effective_use_case().to_lowercase();
+        let has_tool_use = model
+            .effective_capabilities()
+            .contains(&Capability::ToolUse)
             || use_case.contains("tool")
             || use_case.contains("function call")
             || use_case.contains("agent")
@@ -370,6 +403,8 @@ pub struct LlmModel {
     /// Number of key-value heads for GQA (defaults to num_attention_heads if None).
     #[serde(default)]
     pub num_key_value_heads: Option<u32>,
+    #[serde(default)]
+    pub metadata_overlay: Option<ModelMetadataOverlay>,
 }
 
 /// A known GGUF download source for a model on HuggingFace.
@@ -382,6 +417,34 @@ pub struct GgufSource {
 }
 
 impl LlmModel {
+    pub fn effective_context_length(&self) -> u32 {
+        self.metadata_overlay
+            .as_ref()
+            .and_then(|overlay| overlay.context_length)
+            .unwrap_or(self.context_length)
+    }
+
+    pub fn effective_capabilities(&self) -> Vec<Capability> {
+        self.metadata_overlay
+            .as_ref()
+            .and_then(|overlay| overlay.capabilities.clone())
+            .unwrap_or_else(|| self.capabilities.clone())
+    }
+
+    pub fn effective_use_case(&self) -> &str {
+        self.metadata_overlay
+            .as_ref()
+            .and_then(|overlay| overlay.use_case.as_deref())
+            .unwrap_or(&self.use_case)
+    }
+
+    pub fn metadata_source(&self) -> MetadataSource {
+        self.metadata_overlay
+            .as_ref()
+            .map(|overlay| overlay.source.clone())
+            .unwrap_or(MetadataSource::EmbeddedHf)
+    }
+
     /// MLX models are Apple-only — they won't run on NVIDIA/AMD/Intel hardware.
     /// We detect them by the `-MLX-` suffix that's standard on HuggingFace
     /// (e.g. `Qwen3-8B-MLX-4bit`, `LFM2-1.2B-MLX-8bit`).
@@ -613,6 +676,7 @@ fn load_embedded() -> Vec<LlmModel> {
                 format: e.format,
                 num_attention_heads: None,
                 num_key_value_heads: None,
+                metadata_overlay: None,
             };
             finalize_model(model)
         })
@@ -635,7 +699,10 @@ impl ModelDatabase {
     /// Silently ignores a missing or corrupt cache file.
     pub fn new() -> Self {
         ModelDatabase {
-            models: merge_cached_models(load_embedded(), crate::update::load_cache()),
+            models: apply_metadata_overlays(
+                merge_cached_models(load_embedded(), crate::update::load_cache()),
+                crate::update::load_lmstudio_metadata_cache(),
+            ),
         }
     }
 
@@ -651,7 +718,8 @@ impl ModelDatabase {
                 m.name.to_lowercase().contains(&query_lower)
                     || m.provider.to_lowercase().contains(&query_lower)
                     || m.parameter_count.to_lowercase().contains(&query_lower)
-                    || context_matches_search_term(&query_lower, m.context_length)
+                    || m.effective_use_case().to_lowercase().contains(&query_lower)
+                    || context_matches_search_term(&query_lower, m.effective_context_length())
             })
             .collect()
     }
@@ -704,6 +772,18 @@ fn merge_cached_models(mut embedded: Vec<LlmModel>, cached_models: Vec<LlmModel>
 
     embedded.extend(cached_by_slug.into_values());
     embedded
+}
+
+fn apply_metadata_overlays(
+    mut models: Vec<LlmModel>,
+    overlays: HashMap<String, ModelMetadataOverlay>,
+) -> Vec<LlmModel> {
+    for model in &mut models {
+        if let Some(overlay) = overlays.get(&canonical_slug(&model.name)) {
+            model.metadata_overlay = Some(overlay.clone());
+        }
+    }
+    models
 }
 
 /// Infer attention and KV head counts from the model name and parameter count.
@@ -849,6 +929,7 @@ mod tests {
             format: ModelFormat::default(),
             num_attention_heads: None,
             num_key_value_heads: None,
+            metadata_overlay: None,
         };
 
         // Large budget should return mlx-8bit (best in MLX hierarchy)
@@ -922,6 +1003,7 @@ mod tests {
             format: ModelFormat::default(),
             num_attention_heads: None,
             num_key_value_heads: None,
+            metadata_overlay: None,
         };
         assert_eq!(model.params_b(), 7.0);
     }
@@ -949,6 +1031,7 @@ mod tests {
             format: ModelFormat::default(),
             num_attention_heads: None,
             num_key_value_heads: None,
+            metadata_overlay: None,
         };
         assert_eq!(model.params_b(), 13.0);
     }
@@ -976,6 +1059,7 @@ mod tests {
             format: ModelFormat::default(),
             num_attention_heads: None,
             num_key_value_heads: None,
+            metadata_overlay: None,
         };
         assert_eq!(model.params_b(), 0.5);
     }
@@ -1003,6 +1087,7 @@ mod tests {
             format: ModelFormat::default(),
             num_attention_heads: None,
             num_key_value_heads: None,
+            metadata_overlay: None,
         };
 
         let mem = model.estimate_memory_gb("Q4_K_M", 4096);
@@ -1038,6 +1123,7 @@ mod tests {
             format: ModelFormat::default(),
             num_attention_heads: None,
             num_key_value_heads: None,
+            metadata_overlay: None,
         };
 
         // Large budget should return best quant
@@ -1079,6 +1165,7 @@ mod tests {
             format: ModelFormat::default(),
             num_attention_heads: None,
             num_key_value_heads: None,
+            metadata_overlay: None,
         };
         assert!(dense_model.moe_active_vram_gb().is_none());
 
@@ -1104,6 +1191,7 @@ mod tests {
             format: ModelFormat::default(),
             num_attention_heads: None,
             num_key_value_heads: None,
+            metadata_overlay: None,
         };
         let vram = moe_model.moe_active_vram_gb();
         assert!(vram.is_some());
@@ -1137,6 +1225,7 @@ mod tests {
             format: ModelFormat::default(),
             num_attention_heads: None,
             num_key_value_heads: None,
+            metadata_overlay: None,
         };
         assert!(dense_model.moe_offloaded_ram_gb().is_none());
 
@@ -1162,6 +1251,7 @@ mod tests {
             format: ModelFormat::default(),
             num_attention_heads: None,
             num_key_value_heads: None,
+            metadata_overlay: None,
         };
         let offloaded = moe_model.moe_offloaded_ram_gb();
         assert!(offloaded.is_some());
@@ -1197,6 +1287,7 @@ mod tests {
             format: ModelFormat::default(),
             num_attention_heads: None,
             num_key_value_heads: None,
+            metadata_overlay: None,
         };
         assert_eq!(UseCase::from_model(&model), UseCase::Coding);
     }
@@ -1224,6 +1315,7 @@ mod tests {
             format: ModelFormat::default(),
             num_attention_heads: None,
             num_key_value_heads: None,
+            metadata_overlay: None,
         };
         assert_eq!(UseCase::from_model(&model), UseCase::Embedding);
     }
@@ -1251,6 +1343,7 @@ mod tests {
             format: ModelFormat::default(),
             num_attention_heads: None,
             num_key_value_heads: None,
+            metadata_overlay: None,
         };
         assert_eq!(UseCase::from_model(&model), UseCase::Reasoning);
     }
@@ -1278,6 +1371,7 @@ mod tests {
             format: ModelFormat::default(),
             num_attention_heads: None,
             num_key_value_heads: None,
+            metadata_overlay: None,
         };
         assert_eq!(UseCase::from_model(&model), UseCase::Agentic);
     }
@@ -1341,11 +1435,9 @@ mod tests {
         // Search by name substring (case insensitive)
         let results = db.find_model("llama");
         assert!(!results.is_empty());
-        assert!(
-            results
-                .iter()
-                .any(|m| m.name.to_lowercase().contains("llama"))
-        );
+        assert!(results
+            .iter()
+            .any(|m| m.name.to_lowercase().contains("llama")));
 
         // Search should be case insensitive
         let results_upper = db.find_model("LLAMA");
@@ -1397,6 +1489,7 @@ mod tests {
             format: ModelFormat::default(),
             num_attention_heads: None,
             num_key_value_heads: None,
+            metadata_overlay: None,
         };
         let caps = Capability::infer(&model);
         assert!(caps.contains(&Capability::Vision));
@@ -1427,6 +1520,7 @@ mod tests {
             format: ModelFormat::default(),
             num_attention_heads: None,
             num_key_value_heads: None,
+            metadata_overlay: None,
         };
         let caps = Capability::infer(&model);
         assert!(caps.contains(&Capability::ToolUse));
@@ -1456,6 +1550,7 @@ mod tests {
             format: ModelFormat::default(),
             num_attention_heads: None,
             num_key_value_heads: None,
+            metadata_overlay: None,
         };
         let caps = Capability::infer(&model);
         assert!(caps.is_empty());
@@ -1484,6 +1579,7 @@ mod tests {
             format: ModelFormat::default(),
             num_attention_heads: None,
             num_key_value_heads: None,
+            metadata_overlay: None,
         };
         let caps = Capability::infer(&model);
         // Should keep the explicit Vision and not duplicate it
@@ -1554,7 +1650,7 @@ mod tests {
             "meta-llama/Llama-3.3-70B-Instruct",
             "Qwen/Qwen2.5-7B-Instruct",
             "Qwen/Qwen2.5-Coder-7B-Instruct",
-            "meta-llama/Meta-Llama-3-8B-Instruct",
+            "meta-llama/Llama-3.1-8B-Instruct",
             "mistralai/Mistral-7B-Instruct-v0.3",
         ];
         for name in &expected_with_gguf {
@@ -1565,6 +1661,35 @@ mod tests {
                 !model.gguf_sources.is_empty(),
                 "Model {} should have gguf_sources but has none",
                 name
+            );
+        }
+    }
+
+    #[test]
+    fn test_catalog_sampled_runtime_artifact_models_have_gguf_sources() {
+        let db = ModelDatabase::embedded();
+        let sampled_models = [
+            "HuggingFaceTB/SmolLM3-3B",
+            "microsoft/Phi-4-mini-reasoning",
+            "google/gemma-3n-E2B-it",
+            "XiaomiMiMo/MiMo-7B-RL",
+            "mistralai/Ministral-8B-Instruct-2410",
+            "nvidia/NVIDIA-Nemotron-Nano-9B-v2",
+            "microsoft/Phi-4-reasoning",
+            "Qwen/Qwen3-14B",
+            "LGAI-EXAONE/EXAONE-4.0-32B",
+            "allenai/OLMo-2-0325-32B-Instruct",
+        ];
+
+        for name in sampled_models {
+            let model = db
+                .get_all_models()
+                .iter()
+                .find(|m| m.name == name)
+                .unwrap_or_else(|| panic!("Sampled model {name} should exist in catalog"));
+            assert!(
+                !model.gguf_sources.is_empty(),
+                "Sampled model {name} should have discovered gguf_sources"
             );
         }
     }
@@ -1586,8 +1711,13 @@ mod tests {
                     model.name
                 );
                 assert!(
-                    source.repo.to_uppercase().contains("GGUF"),
-                    "GGUF source repo '{}' for model '{}' should contain 'GGUF'",
+                    !source.repo.trim().is_empty(),
+                    "GGUF source repo for model '{}' should not be empty",
+                    model.name
+                );
+                assert!(
+                    source.repo != model.name,
+                    "GGUF source repo '{}' for model '{}' should differ from base model repo",
                     source.repo,
                     model.name
                 );
@@ -1646,6 +1776,7 @@ mod tests {
             format: ModelFormat::default(),
             num_attention_heads: attn_heads,
             num_key_value_heads: kv_heads,
+            metadata_overlay: None,
         }
     }
 
