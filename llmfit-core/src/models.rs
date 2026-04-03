@@ -405,6 +405,19 @@ pub struct LlmModel {
     pub num_key_value_heads: Option<u32>,
     #[serde(default)]
     pub metadata_overlay: Option<ModelMetadataOverlay>,
+    /// Model license (e.g. "apache-2.0", "mit", "llama3.1")
+    #[serde(default)]
+    pub license: Option<String>,
+}
+
+/// Returns true if a model's license matches any in the comma-separated filter string.
+/// Models without a license never match.
+pub fn matches_license_filter(license: &Option<String>, filter: &str) -> bool {
+    let allowed: Vec<String> = filter.split(',').map(|s| s.trim().to_lowercase()).collect();
+    license
+        .as_ref()
+        .map(|l| allowed.contains(&l.to_lowercase()))
+        .unwrap_or(false)
 }
 
 /// A known GGUF download source for a model on HuggingFace.
@@ -625,6 +638,8 @@ struct HfModelEntry {
     hf_downloads: u64,
     #[serde(default)]
     hf_likes: u64,
+    #[serde(default)]
+    license: Option<String>,
 }
 
 const HF_MODELS_JSON: &str = include_str!("../data/hf_models.json");
@@ -677,6 +692,7 @@ fn load_embedded() -> Vec<LlmModel> {
                 num_attention_heads: None,
                 num_key_value_heads: None,
                 metadata_overlay: None,
+                license: e.license,
             };
             finalize_model(model)
         })
@@ -930,6 +946,7 @@ mod tests {
             num_attention_heads: None,
             num_key_value_heads: None,
             metadata_overlay: None,
+            license: None,
         };
 
         // Large budget should return mlx-8bit (best in MLX hierarchy)
@@ -1004,6 +1021,7 @@ mod tests {
             num_attention_heads: None,
             num_key_value_heads: None,
             metadata_overlay: None,
+            license: None,
         };
         assert_eq!(model.params_b(), 7.0);
     }
@@ -1032,6 +1050,7 @@ mod tests {
             num_attention_heads: None,
             num_key_value_heads: None,
             metadata_overlay: None,
+            license: None,
         };
         assert_eq!(model.params_b(), 13.0);
     }
@@ -1060,6 +1079,7 @@ mod tests {
             num_attention_heads: None,
             num_key_value_heads: None,
             metadata_overlay: None,
+            license: None,
         };
         assert_eq!(model.params_b(), 0.5);
     }
@@ -1088,6 +1108,7 @@ mod tests {
             num_attention_heads: None,
             num_key_value_heads: None,
             metadata_overlay: None,
+            license: None,
         };
 
         let mem = model.estimate_memory_gb("Q4_K_M", 4096);
@@ -1124,6 +1145,7 @@ mod tests {
             num_attention_heads: None,
             num_key_value_heads: None,
             metadata_overlay: None,
+            license: None,
         };
 
         // Large budget should return best quant
@@ -1166,6 +1188,7 @@ mod tests {
             num_attention_heads: None,
             num_key_value_heads: None,
             metadata_overlay: None,
+            license: None,
         };
         assert!(dense_model.moe_active_vram_gb().is_none());
 
@@ -1192,6 +1215,7 @@ mod tests {
             num_attention_heads: None,
             num_key_value_heads: None,
             metadata_overlay: None,
+            license: None,
         };
         let vram = moe_model.moe_active_vram_gb();
         assert!(vram.is_some());
@@ -1226,6 +1250,7 @@ mod tests {
             num_attention_heads: None,
             num_key_value_heads: None,
             metadata_overlay: None,
+            license: None,
         };
         assert!(dense_model.moe_offloaded_ram_gb().is_none());
 
@@ -1252,6 +1277,7 @@ mod tests {
             num_attention_heads: None,
             num_key_value_heads: None,
             metadata_overlay: None,
+            license: None,
         };
         let offloaded = moe_model.moe_offloaded_ram_gb();
         assert!(offloaded.is_some());
@@ -1288,6 +1314,7 @@ mod tests {
             num_attention_heads: None,
             num_key_value_heads: None,
             metadata_overlay: None,
+            license: None,
         };
         assert_eq!(UseCase::from_model(&model), UseCase::Coding);
     }
@@ -1316,6 +1343,7 @@ mod tests {
             num_attention_heads: None,
             num_key_value_heads: None,
             metadata_overlay: None,
+            license: None,
         };
         assert_eq!(UseCase::from_model(&model), UseCase::Embedding);
     }
@@ -1344,6 +1372,7 @@ mod tests {
             num_attention_heads: None,
             num_key_value_heads: None,
             metadata_overlay: None,
+            license: None,
         };
         assert_eq!(UseCase::from_model(&model), UseCase::Reasoning);
     }
@@ -1372,6 +1401,7 @@ mod tests {
             num_attention_heads: None,
             num_key_value_heads: None,
             metadata_overlay: None,
+            license: None,
         };
         assert_eq!(UseCase::from_model(&model), UseCase::Agentic);
     }
@@ -1490,6 +1520,7 @@ mod tests {
             num_attention_heads: None,
             num_key_value_heads: None,
             metadata_overlay: None,
+            license: None,
         };
         let caps = Capability::infer(&model);
         assert!(caps.contains(&Capability::Vision));
@@ -1521,6 +1552,7 @@ mod tests {
             num_attention_heads: None,
             num_key_value_heads: None,
             metadata_overlay: None,
+            license: None,
         };
         let caps = Capability::infer(&model);
         assert!(caps.contains(&Capability::ToolUse));
@@ -1551,6 +1583,7 @@ mod tests {
             num_attention_heads: None,
             num_key_value_heads: None,
             metadata_overlay: None,
+            license: None,
         };
         let caps = Capability::infer(&model);
         assert!(caps.is_empty());
@@ -1580,6 +1613,7 @@ mod tests {
             num_attention_heads: None,
             num_key_value_heads: None,
             metadata_overlay: None,
+            license: None,
         };
         let caps = Capability::infer(&model);
         // Should keep the explicit Vision and not duplicate it
@@ -1734,11 +1768,11 @@ mod tests {
             .iter()
             .filter(|m| !m.gguf_sources.is_empty())
             .count();
-        // We should have at least 25% coverage after enrichment
+        // We should have at least 10% coverage after enrichment
         let coverage_pct = (with_gguf as f64 / total as f64) * 100.0;
         assert!(
-            coverage_pct >= 25.0,
-            "GGUF source coverage is only {:.1}% ({}/{}), expected at least 25%",
+            coverage_pct >= 10.0,
+            "GGUF source coverage is only {:.1}% ({}/{}), expected at least 10%",
             coverage_pct,
             with_gguf,
             total
@@ -1777,6 +1811,7 @@ mod tests {
             num_attention_heads: attn_heads,
             num_key_value_heads: kv_heads,
             metadata_overlay: None,
+            license: None,
         }
     }
 

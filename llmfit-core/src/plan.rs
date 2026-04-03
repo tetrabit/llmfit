@@ -734,6 +734,7 @@ mod tests {
             num_attention_heads: None,
             num_key_value_heads: None,
             metadata_overlay: None,
+            license: None,
         }
     }
 

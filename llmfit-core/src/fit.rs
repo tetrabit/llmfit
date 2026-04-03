@@ -1097,6 +1097,7 @@ mod tests {
             num_attention_heads: None,
             num_key_value_heads: None,
             metadata_overlay: None,
+            license: None,
         }
     }
 
@@ -1278,6 +1279,7 @@ mod tests {
             num_attention_heads: None,
             num_key_value_heads: None,
             metadata_overlay: None,
+            license: None,
         };
         let mut system = test_system(64.0, true, Some(8.0));
         system.backend = GpuBackend::Cuda;
@@ -1314,6 +1316,7 @@ mod tests {
             num_attention_heads: None,
             num_key_value_heads: None,
             metadata_overlay: None,
+            license: None,
         };
         let system = test_system(12.0, true, Some(8.0));
 

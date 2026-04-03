@@ -188,6 +188,8 @@ struct HfApiModel {
     /// Exact parameter count when safetensors metadata is available.
     #[serde(default)]
     safetensors: Option<SafetensorsInfo>,
+    #[serde(default)]
+    license: Option<String>,
 }
 
 #[derive(Deserialize, Debug, Default)]
@@ -1044,6 +1046,7 @@ fn build_lmstudio_catalog_model(
             artifact_name: page.artifact_name.clone(),
             notes: page.notes.clone(),
         }),
+        license: None,
     })
 }
 
@@ -1156,6 +1159,12 @@ fn map_to_llm_model(hf: HfApiModel, precise_context_length: Option<u32>) -> Opti
         .as_deref()
         .map(|s| s.get(..10).unwrap_or(s).to_string());
 
+    let license = hf.license.or_else(|| {
+        hf.tags
+            .iter()
+            .find_map(|t| t.strip_prefix("license:").map(|l| l.to_string()))
+    });
+
     Some(LlmModel {
         name: hf.id,
         provider,
@@ -1181,6 +1190,7 @@ fn map_to_llm_model(hf: HfApiModel, precise_context_length: Option<u32>) -> Opti
         num_attention_heads: None,
         num_key_value_heads: None,
         metadata_overlay: None,
+        license,
     })
 }
 

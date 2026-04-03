@@ -381,7 +381,7 @@ Recommend top models for your hardware (JSON-friendly).
 
 Analyzes all models against detected hardware and returns the top N ranked
 recommendations. Supports filtering by use case, fit level, inference runtime,
-and model capabilities. JSON output is enabled by default.
+model capabilities, and license. JSON output is enabled by default.
 
 PRECONDITIONS:
   Requires hardware detection. Use --memory to override GPU VRAM if needed.
@@ -398,12 +398,13 @@ AGENT USAGE:
   llmfit recommend -n 3 --use-case coding --min-fit good
   llmfit recommend --runtime mlx --capability vision
   llmfit recommend --force-runtime llamacpp  # get llama.cpp results on Apple Silicon
+  llmfit recommend --license apache-2.0,mit
 
   JSON output is the default. Fields: { system: {...}, models: [{ name,
   provider, parameter_count, fit_level, run_mode, score, score_components
   { quality, speed, fit, context }, estimated_tps, memory_required_gb,
-  memory_available_gb, utilization_pct, best_quant, use_case, runtime,
-  capabilities }] }")]
+  memory_available_gb, utilization_pct, best_quant, use_case, license,
+  runtime, capabilities }] }")]
     Recommend {
         /// Limit number of recommendations
         #[arg(short = 'n', long, default_value = "5")]
@@ -429,6 +430,10 @@ AGENT USAGE:
         /// Filter by capability: vision, tool_use (comma-separated for multiple)
         #[arg(long, value_name = "CAPS")]
         capability: Option<String>,
+
+        /// Filter by license (comma-separated, e.g. "apache-2.0,mit")
+        #[arg(long, value_name = "LICENSE")]
+        license: Option<String>,
 
         /// Output as JSON (default for recommend)
         #[arg(long, default_value = "true")]
@@ -1055,6 +1060,7 @@ fn run_recommend(
     runtime_filter: String,
     force_runtime: Option<String>,
     capability: Option<String>,
+    license: Option<String>,
     json: bool,
     memory_override: &Option<String>,
     context_limit: Option<u32>,
@@ -1156,6 +1162,11 @@ fn run_recommend(
                     _ => true,
                 })
         });
+    }
+
+    // Filter by license if specified
+    if let Some(ref lic_str) = license {
+        fits.retain(|f| llmfit_core::models::matches_license_filter(&f.model.license, lic_str));
     }
 
     fits = llmfit_core::fit::rank_models_by_fit(fits);
@@ -1825,6 +1836,7 @@ fn main() {
                 runtime,
                 force_runtime,
                 capability,
+                license,
                 json,
             } => {
                 run_recommend(
@@ -1834,6 +1846,7 @@ fn main() {
                     runtime,
                     force_runtime,
                     capability,
+                    license,
                     json,
                     &cli.memory,
                     context_limit,
@@ -1933,6 +1946,7 @@ mod tests {
                 num_attention_heads: None,
                 num_key_value_heads: None,
                 metadata_overlay: None,
+                license: None,
             },
             fit_level,
             run_mode: RunMode::Gpu,
@@ -2009,6 +2023,7 @@ mod tests {
                 num_attention_heads: None,
                 num_key_value_heads: None,
                 metadata_overlay: None,
+                license: None,
             },
             LlmModel {
                 name: "Qwen/Qwen3-Coder-Next".to_string(),
@@ -2032,6 +2047,7 @@ mod tests {
                 num_attention_heads: None,
                 num_key_value_heads: None,
                 metadata_overlay: None,
+                license: None,
             },
         ];
 

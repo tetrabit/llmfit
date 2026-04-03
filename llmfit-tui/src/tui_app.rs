@@ -30,6 +30,7 @@ pub enum InputMode {
     QuantPopup,
     RunModePopup,
     ParamsBucketPopup,
+    LicensePopup,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -572,6 +573,11 @@ pub struct App {
     pub selected_params_buckets: Vec<bool>,
     pub params_bucket_cursor: usize,
 
+    // License filter (popup)
+    pub licenses: Vec<String>,
+    pub selected_licenses: Vec<bool>,
+    pub license_cursor: usize,
+
     // Theme
     pub theme: Theme,
 
@@ -959,6 +965,25 @@ impl App {
         ];
         let selected_params_buckets = vec![true; params_buckets.len()];
 
+        // Extract unique licenses (including "Unknown" for models without one)
+        let mut model_licenses: Vec<String> = all_fits
+            .iter()
+            .map(|f| {
+                f.model
+                    .license
+                    .clone()
+                    .unwrap_or_else(|| "Unknown".to_string())
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        // Move "Unknown" to the end if present
+        if let Some(pos) = model_licenses.iter().position(|l| l == "Unknown") {
+            let unknown = model_licenses.remove(pos);
+            model_licenses.push(unknown);
+        }
+        let selected_licenses = vec![true; model_licenses.len()];
+
         let filtered_count = all_fits.len();
 
         let (download_capability_tx, download_capability_rx) = mpsc::channel();
@@ -1062,6 +1087,9 @@ impl App {
             params_buckets,
             selected_params_buckets,
             params_bucket_cursor: 0,
+            licenses: model_licenses,
+            selected_licenses,
+            license_cursor: 0,
             theme: Theme::load(),
             backend_hidden_count,
         };
@@ -1106,8 +1134,9 @@ impl App {
                             .to_lowercase()
                     );
                     // Combine all searchable fields into one string
+                    let license_text = fit.model.license.as_deref().unwrap_or("").to_lowercase();
                     let searchable = format!(
-                        "{} {} {} {} {} {} {}",
+                        "{} {} {} {} {} {} {} {}",
                         fit.model.name.to_lowercase(),
                         fit.model.provider.to_lowercase(),
                         fit.model.parameter_count.to_lowercase(),
@@ -1115,6 +1144,7 @@ impl App {
                         fit.use_case.label().to_lowercase(),
                         caps_text,
                         context_text,
+                        license_text
                     );
                     // All terms must be present (AND logic)
                     terms.iter().all(|term| {
@@ -1238,6 +1268,20 @@ impl App {
                     .map(|min_context| fit.model.effective_context_length() >= min_context)
                     .unwrap_or(true);
 
+                // License filter
+                let matches_license = {
+                    let all_selected = self.selected_licenses.iter().all(|&s| s);
+                    if all_selected || self.licenses.is_empty() {
+                        true
+                    } else {
+                        let model_lic = fit.model.license.as_deref().unwrap_or("Unknown");
+                        self.licenses
+                            .iter()
+                            .zip(self.selected_licenses.iter())
+                            .any(|(l, &sel)| sel && l == model_lic)
+                    }
+                };
+
                 matches_search
                     && matches_provider
                     && matches_use_case
@@ -1250,6 +1294,7 @@ impl App {
                     && matches_params_bucket
                     && matches_tp
                     && matches_context
+                    && matches_license
             })
             .map(|(i, _)| i)
             .collect();
@@ -2032,6 +2077,45 @@ impl App {
         }
         self.apply_filters();
         self.save_filter_state();
+    }
+
+    // ── License popup ───────────────────────────────────────────
+
+    pub fn open_license_popup(&mut self) {
+        self.input_mode = InputMode::LicensePopup;
+    }
+
+    pub fn close_license_popup(&mut self) {
+        self.input_mode = InputMode::Normal;
+    }
+
+    pub fn license_popup_up(&mut self) {
+        if self.license_cursor > 0 {
+            self.license_cursor -= 1;
+        }
+    }
+
+    pub fn license_popup_down(&mut self) {
+        if self.license_cursor + 1 < self.licenses.len() {
+            self.license_cursor += 1;
+        }
+    }
+
+    pub fn license_popup_toggle(&mut self) {
+        if self.license_cursor < self.selected_licenses.len() {
+            self.selected_licenses[self.license_cursor] =
+                !self.selected_licenses[self.license_cursor];
+            self.apply_filters();
+        }
+    }
+
+    pub fn license_popup_select_all(&mut self) {
+        let all_selected = self.selected_licenses.iter().all(|&s| s);
+        let new_val = !all_selected;
+        for s in &mut self.selected_licenses {
+            *s = new_val;
+        }
+        self.apply_filters();
     }
 
     pub fn toggle_installed_first(&mut self) {
@@ -3086,6 +3170,7 @@ mod tests {
                     num_attention_heads: None,
                     num_key_value_heads: None,
                     metadata_overlay: None,
+                    license: None,
                 },
                 fit_level: FitLevel::Good,
                 run_mode: RunMode::Gpu,
@@ -3114,6 +3199,9 @@ mod tests {
             selected_use_cases: vec![],
             capabilities: vec![],
             selected_capabilities: vec![],
+            licenses: vec![],
+            selected_licenses: vec![],
+            license_cursor: 0,
             fit_filter: super::FitFilter::All,
             runtime_filter: RuntimeFilter::Any,
             availability_filter: super::AvailabilityFilter::All,
@@ -3817,6 +3905,9 @@ mod tests {
             params_buckets: vec!["<3B".to_string(), "7-14B".to_string()],
             selected_params_buckets: vec![true, true],
             params_bucket_cursor: 0,
+            licenses: vec![],
+            selected_licenses: vec![],
+            license_cursor: 0,
             theme: crate::theme::Theme::Default,
             backend_hidden_count: 0,
         };
@@ -4043,6 +4134,9 @@ mod tests {
             params_buckets: vec![],
             selected_params_buckets: vec![],
             params_bucket_cursor: 0,
+            licenses: vec![],
+            selected_licenses: vec![],
+            license_cursor: 0,
             theme: crate::theme::Theme::Default,
             backend_hidden_count: 0,
         };
@@ -4070,6 +4164,7 @@ mod tests {
                 num_attention_heads: None,
                 num_key_value_heads: None,
                 metadata_overlay: None,
+                license: None,
             },
             fit_level: FitLevel::Good,
             run_mode: RunMode::Gpu,
@@ -4212,6 +4307,9 @@ mod tests {
             params_buckets: vec![],
             selected_params_buckets: vec![],
             params_bucket_cursor: 0,
+            licenses: vec![],
+            selected_licenses: vec![],
+            license_cursor: 0,
             theme: crate::theme::Theme::Default,
             backend_hidden_count: 0,
         };
@@ -4239,6 +4337,7 @@ mod tests {
                 num_attention_heads: None,
                 num_key_value_heads: None,
                 metadata_overlay: None,
+                license: None,
             },
             fit_level: FitLevel::Good,
             run_mode: RunMode::Gpu,
@@ -4379,6 +4478,9 @@ mod tests {
             params_buckets: vec![],
             selected_params_buckets: vec![],
             params_bucket_cursor: 0,
+            licenses: vec![],
+            selected_licenses: vec![],
+            license_cursor: 0,
             theme: crate::theme::Theme::Default,
             backend_hidden_count: 0,
         };
@@ -4409,6 +4511,7 @@ mod tests {
                 num_attention_heads: None,
                 num_key_value_heads: None,
                 metadata_overlay: None,
+                license: None,
             },
             fit_level: FitLevel::Good,
             run_mode: RunMode::Gpu,
@@ -4488,6 +4591,7 @@ mod tests {
                 num_attention_heads: None,
                 num_key_value_heads: None,
                 metadata_overlay: None,
+                license: None,
             },
             fit_level: FitLevel::Good,
             run_mode: RunMode::Gpu,

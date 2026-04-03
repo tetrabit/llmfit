@@ -34,7 +34,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             Constraint::Length(4), // system info bar (2 rows)
             Constraint::Length(3), // search + filters
             Constraint::Min(10),   // main table
-            Constraint::Length(2), // status bar
+            Constraint::Length(2), // status bar (model name + keybindings)
         ])
         .split(frame.area());
 
@@ -70,6 +70,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         draw_run_mode_popup(frame, app, &tc);
     } else if app.input_mode == InputMode::ParamsBucketPopup {
         draw_params_bucket_popup(frame, app, &tc);
+    } else if app.input_mode == InputMode::LicensePopup {
+        draw_license_popup(frame, app, &tc);
     }
 }
 
@@ -294,7 +296,8 @@ fn draw_search_and_filters(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeC
         | InputMode::Select
         | InputMode::QuantPopup
         | InputMode::RunModePopup
-        | InputMode::ParamsBucketPopup => Style::default().fg(tc.muted),
+        | InputMode::ParamsBucketPopup
+        | InputMode::LicensePopup => Style::default().fg(tc.muted),
     };
 
     let search_text = if app.search_query.is_empty() && app.input_mode == InputMode::Normal {
@@ -1082,6 +1085,13 @@ fn render_compare_panel(
             ),
         ]),
         Line::from(vec![
+            Span::styled("  License:", Style::default().fg(tc.muted)),
+            Span::styled(
+                format!(" {}", fit.model.license.as_deref().unwrap_or("Unknown")),
+                Style::default().fg(tc.fg),
+            ),
+        ]),
+        Line::from(vec![
             Span::styled("  Score: ", Style::default().fg(tc.muted)),
             Span::styled(metrics.score.clone(), metrics.score_style),
         ]),
@@ -1379,6 +1389,16 @@ fn draw_multi_compare(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors
         styles: vec![Style::default().fg(tc.muted); n],
     });
 
+    // License
+    rows.push(AttrRow {
+        label: "License",
+        values: visible_models
+            .iter()
+            .map(|m| m.model.license.as_deref().unwrap_or("Unknown").to_string())
+            .collect(),
+        styles: vec![Style::default().fg(tc.muted); n],
+    });
+
     // Runtime
     rows.push(AttrRow {
         label: "Runtime",
@@ -1539,6 +1559,13 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
             Span::styled("  Released:    ", Style::default().fg(tc.muted)),
             Span::styled(
                 fit.model.release_date.as_deref().unwrap_or("Unknown"),
+                Style::default().fg(tc.fg),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  License:     ", Style::default().fg(tc.muted)),
+            Span::styled(
+                fit.model.license.as_deref().unwrap_or("Unknown"),
                 Style::default().fg(tc.fg),
             ),
         ]),
@@ -2496,7 +2523,7 @@ fn status_keys_and_mode(app: &App) -> (Vec<String>, String) {
                         detail_key,
                     ),
                     format!(
-                        " p:plan  m:mark  c:compare  x:clear mark  y:copy{}  P:providers  U:use cases  C:caps  Q:quants  q:quit  tok/s*:est",
+                        " p:plan  m:mark  c:compare  x:clear mark  y:copy{}  P:providers  U:use cases  C:caps  Q:quants  L:licenses  q:quit  tok/s*:est",
                         ollama_keys,
                     ),
                 ],
@@ -2566,31 +2593,51 @@ fn status_keys_and_mode(app: &App) -> (Vec<String>, String) {
             vec!["  ↑↓/jk:navigate  Space:toggle  a:all/none  Esc:close".to_string()],
             "PARAMS".to_string(),
         ),
+        InputMode::LicensePopup => (
+            vec!["  ↑↓/jk:navigate  Space:toggle  a:all/none  Esc:close".to_string()],
+            "LICENSE".to_string(),
+        ),
     }
 }
 
 fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
     let (keys, mode_text) = status_keys_and_mode(app);
-    let status_text = Text::from(
-        keys.iter()
-            .enumerate()
-            .map(|(idx, line)| {
-                if idx == 0 {
-                    Line::from(vec![
-                        Span::styled(
-                            format!(" {} ", mode_text),
-                            Style::default().fg(tc.status_fg).bg(tc.status_bg).bold(),
-                        ),
-                        Span::styled(line.clone(), Style::default().fg(tc.muted)),
-                    ])
-                } else {
-                    Line::from(Span::styled(line.clone(), Style::default().fg(tc.muted)))
-                }
-            })
-            .collect::<Vec<_>>(),
-    );
+    let keys_joined = keys.join(" ");
 
-    // If a download is in progress, show the progress bar
+    // Split into 2 rows: selected model name + keybindings
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Length(1)])
+        .split(area);
+
+    // Row 0: selected model full name
+    let model_line =
+        if !app.show_detail && !app.show_compare && !app.show_multi_compare && !app.show_plan {
+            if let Some(&idx) = app.filtered_fits.get(app.selected_row) {
+                let fit = &app.all_fits[idx];
+                Line::from(vec![
+                    Span::styled(" ▶ ", Style::default().fg(tc.accent).bold()),
+                    Span::styled(
+                        fit.model.name.clone(),
+                        Style::default().fg(tc.fg).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!("  {}  {}", fit.model.parameter_count, fit.model.provider),
+                        Style::default().fg(tc.muted),
+                    ),
+                ])
+            } else {
+                Line::from(Span::styled(
+                    " No model selected",
+                    Style::default().fg(tc.muted),
+                ))
+            }
+        } else {
+            Line::from("")
+        };
+    frame.render_widget(Paragraph::new(model_line), rows[0]);
+
+    // Row 1: keybindings (with download progress if active)
     if let Some(status) = &app.pull_status {
         let progress_text = if let Some(pct) = app.pull_percent {
             format!(" {} [{:.0}%] ", status, pct)
@@ -2610,12 +2657,16 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
                 Constraint::Min(20),
                 Constraint::Length(progress_text.len() as u16 + 2),
             ])
-            .split(area);
+            .split(rows[1]);
 
-        frame.render_widget(
-            Paragraph::new(status_text.clone()).wrap(Wrap { trim: false }),
-            chunks[0],
-        );
+        let status_line = Line::from(vec![
+            Span::styled(
+                format!(" {} ", mode_text),
+                Style::default().fg(tc.status_fg).bg(tc.status_bg).bold(),
+            ),
+            Span::styled(keys_joined.clone(), Style::default().fg(tc.muted)),
+        ]);
+        frame.render_widget(Paragraph::new(status_line), chunks[0]);
 
         let pull_color = if app.pull_active.is_some() {
             tc.warning
@@ -2632,7 +2683,15 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
         return;
     }
 
-    frame.render_widget(Paragraph::new(status_text).wrap(Wrap { trim: false }), area);
+    let status_line = Line::from(vec![
+        Span::styled(
+            format!(" {} ", mode_text),
+            Style::default().fg(tc.status_fg).bg(tc.status_bg).bold(),
+        ),
+        Span::styled(keys_joined, Style::default().fg(tc.muted)),
+    ]);
+
+    frame.render_widget(Paragraph::new(status_line), rows[1]);
 }
 
 fn draw_quant_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
@@ -2846,6 +2905,81 @@ fn draw_params_bucket_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
 
     let active_count = app.selected_params_buckets.iter().filter(|&&s| s).count();
     let title = format!(" Params ({}/{}) ", active_count, total);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(tc.accent_secondary))
+        .title(title)
+        .title_style(
+            Style::default()
+                .fg(tc.accent_secondary)
+                .add_modifier(Modifier::BOLD),
+        );
+
+    let paragraph = Paragraph::new(lines).block(block);
+    frame.render_widget(paragraph, popup_area);
+}
+
+fn draw_license_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
+    let area = frame.area();
+
+    let max_name_len = app.licenses.iter().map(|l| l.len()).max().unwrap_or(10);
+    let popup_width = (max_name_len as u16 + 10).min(area.width.saturating_sub(4));
+    let popup_height = (app.licenses.len() as u16 + 2).min(area.height.saturating_sub(4));
+
+    let x = area.x + (area.width.saturating_sub(popup_width)) / 2;
+    let y = area.y + (area.height.saturating_sub(popup_height)) / 2;
+    let popup_area = Rect::new(x, y, popup_width, popup_height);
+
+    frame.render_widget(Clear, popup_area);
+
+    let inner_height = popup_height.saturating_sub(2) as usize;
+    let total = app.licenses.len();
+
+    let scroll_offset = if app.license_cursor >= inner_height {
+        app.license_cursor - inner_height + 1
+    } else {
+        0
+    };
+
+    let lines: Vec<Line> = app
+        .licenses
+        .iter()
+        .enumerate()
+        .skip(scroll_offset)
+        .take(inner_height)
+        .map(|(i, name)| {
+            let checkbox = if app.selected_licenses[i] {
+                "[x]"
+            } else {
+                "[ ]"
+            };
+            let is_cursor = i == app.license_cursor;
+
+            let style = if is_cursor {
+                if app.selected_licenses[i] {
+                    Style::default()
+                        .fg(tc.good)
+                        .add_modifier(Modifier::BOLD)
+                        .bg(tc.highlight_bg)
+                } else {
+                    Style::default()
+                        .fg(tc.fg)
+                        .add_modifier(Modifier::BOLD)
+                        .bg(tc.highlight_bg)
+                }
+            } else if app.selected_licenses[i] {
+                Style::default().fg(tc.good)
+            } else {
+                Style::default().fg(tc.muted)
+            };
+
+            Line::from(Span::styled(format!(" {} {}", checkbox, name), style))
+        })
+        .collect();
+
+    let active_count = app.selected_licenses.iter().filter(|&&s| s).count();
+    let title = format!(" License ({}/{}) ", active_count, total);
 
     let block = Block::default()
         .borders(Borders::ALL)

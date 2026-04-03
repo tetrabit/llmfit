@@ -893,7 +893,7 @@ def enrich_gguf_sources(models: list[dict]) -> int:
 # ---------------------------------------------------------------------------
 
 # Pipeline tags to search for discoverable models
-DISCOVER_PIPELINES = ["text-generation", "text2text-generation"]
+DISCOVER_PIPELINES = ["text-generation", "text2text-generation", "image-text-to-text"]
 
 # Orgs to skip — these publish many fine-tunes that clutter the list
 SKIP_ORGS = {
@@ -908,28 +908,34 @@ SKIP_ORGS = {
 }
 
 
-def discover_trending_models(limit: int = 30, min_downloads: int = 10000) -> list[str]:
+def discover_trending_models(limit: int = 30, min_downloads: int = 10000) -> list[dict]:
     """Query HuggingFace API for top text-generation models by download count.
 
-    Returns a list of repo IDs (e.g. ["mistralai/Mistral-7B-v0.1", ...])
-    that are NOT already in TARGET_MODELS.
+    Uses ?expand=safetensors to get parameter counts directly from the listing
+    API, avoiding individual API calls per model (per HF team recommendation).
+
+    Returns a list of dicts with model listing data (including safetensors
+    metadata) for models NOT already in TARGET_MODELS.
     """
     curated = set(TARGET_MODELS)
     discovered = []
+    seen_ids = set()
 
     for pipeline in DISCOVER_PIPELINES:
         # Fetch more than we need since we'll filter heavily
-        fetch_limit = limit * 5
+        fetch_limit = min(limit * 8, 10000)  # HF API max is 10000
         url = (
             f"{HF_API}?"
             f"pipeline_tag={pipeline}&"
             f"sort=downloads&"
             f"direction=-1&"
-            f"limit={fetch_limit}"
+            f"limit={fetch_limit}&"
+            f"expand[]=safetensors&"
+            f"expand[]=config"
         )
         req = urllib.request.Request(url, headers=_auth_headers())
         try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
+            with urllib.request.urlopen(req, timeout=60) as resp:
                 models = json.loads(resp.read().decode())
         except Exception as e:
             print(
@@ -942,13 +948,10 @@ def discover_trending_models(limit: int = 30, min_downloads: int = 10000) -> lis
             if not repo_id or "/" not in repo_id:
                 continue
 
-            # Skip if already curated
-            if repo_id in curated:
+            # Skip if already curated or seen
+            if repo_id in curated or repo_id in seen_ids:
                 continue
-
-            # Skip already discovered
-            if repo_id in discovered:
-                continue
+            seen_ids.add(repo_id)
 
             # Skip known repack / converter orgs
             org = repo_id.split("/")[0]
@@ -965,12 +968,20 @@ def discover_trending_models(limit: int = 30, min_downloads: int = 10000) -> lis
             if tags & {"gguf", "adapter", "merge", "lora", "qlora"}:
                 continue
 
-            # Must have safetensors tag (listing API doesn't include param counts,
-            # but the safetensors tag means scrape_model() will find params)
-            if "safetensors" not in tags:
-                continue
+            # Check for actual parameter count from expand=safetensors
+            # (replaces old safetensors tag check — many models have data but no tag)
+            safetensors = m.get("safetensors", {})
+            total_params = safetensors.get("total")
+            if not total_params:
+                params_by_dtype = safetensors.get("parameters", {})
+                if params_by_dtype:
+                    total_params = max(params_by_dtype.values())
+            if not total_params:
+                continue  # no param data available
 
-            discovered.append(repo_id)
+            # Attach param count for downstream use
+            m["_total_params"] = total_params
+            discovered.append(m)
             if len(discovered) >= limit:
                 break
 
@@ -2706,22 +2717,67 @@ def main():
         )
         print(f"  Found {len(trending)} new models not in curated list\n")
 
-        for i, repo_id in enumerate(trending, 1):
+        for i, listing in enumerate(trending, 1):
+            repo_id = listing["id"]
             if repo_id in scraped_names:
                 continue
             print(f"[discover {i}/{len(trending)}] {repo_id}...")
-            model = scrape_model(repo_id)
-            if model:
-                model["_discovered"] = True  # mark as auto-discovered
-                print(
-                    f"  ✓ {model['parameter_count']} params, "
-                    f"{model['hf_downloads']:,} downloads, "
-                    f"ctx {model['context_length']}"
-                )
-                results.append(model)
-                scraped_names.add(repo_id)
-                discovered_count += 1
-            time.sleep(0.3)
+
+            # Build model from listing data (param count already available
+            # from expand=safetensors, avoiding an extra API call per model)
+            total_params = listing["_total_params"]
+            config = listing.get("config", {})
+            pipeline_tag = listing.get("pipeline_tag")
+
+            # Still need config.json for accurate context length
+            full_config = fetch_config_json(repo_id)
+
+            model_format, default_quant = detect_quant_format(repo_id, full_config)
+            context_length = infer_context_length(full_config) if full_config else infer_context_length(config)
+
+            min_ram, rec_ram = estimate_ram(total_params, default_quant)
+            min_vram = estimate_vram(total_params, default_quant)
+
+            architecture = config.get("model_type", "unknown")
+            moe_info = detect_moe(repo_id, full_config, architecture, total_params)
+            use_case_str = infer_use_case(repo_id, pipeline_tag, config)
+
+            model = {
+                "name": repo_id,
+                "provider": extract_provider(repo_id),
+                "parameter_count": format_param_count(total_params),
+                "parameters_raw": total_params,
+                "min_ram_gb": min_ram,
+                "recommended_ram_gb": rec_ram,
+                "min_vram_gb": min_vram,
+                "quantization": default_quant,
+                "format": model_format,
+                "context_length": context_length,
+                "use_case": use_case_str,
+                "capabilities": infer_capabilities(repo_id, pipeline_tag, use_case_str),
+                "pipeline_tag": pipeline_tag or "unknown",
+                "architecture": architecture,
+                "hf_downloads": listing.get("downloads", 0),
+                "hf_likes": listing.get("likes", 0),
+                "release_date": (listing.get("createdAt") or "")[:10] or None,
+                "_discovered": True,
+            }
+
+            if moe_info["is_moe"]:
+                model["is_moe"] = True
+                model["num_experts"] = moe_info["num_experts"]
+                model["active_experts"] = moe_info["active_experts"]
+                model["active_parameters"] = moe_info["active_parameters"]
+
+            print(
+                f"  ✓ {model['parameter_count']} params, "
+                f"{model['hf_downloads']:,} downloads, "
+                f"ctx {model['context_length']}"
+            )
+            results.append(model)
+            scraped_names.add(repo_id)
+            discovered_count += 1
+            time.sleep(0.15)  # Only fetching config.json now, can be faster
 
     # Sort by parameter count
     results.sort(key=lambda m: m["parameters_raw"])
