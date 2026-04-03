@@ -1392,6 +1392,85 @@ impl LmStudioProvider {
         find_binary("lms")
     }
 
+    fn app_binary() -> Option<String> {
+        if let Ok(raw) = std::env::var("LMSTUDIO_APP_BIN") {
+            let trimmed = raw.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+
+        if let Ok(path) = which::which("lm-studio") {
+            return Some(path.to_string_lossy().to_string());
+        }
+
+        let mut candidates = Vec::new();
+
+        #[cfg(target_os = "linux")]
+        {
+            candidates.push(PathBuf::from("/usr/bin/lm-studio"));
+            candidates.push(PathBuf::from("/usr/local/bin/lm-studio"));
+            candidates.push(PathBuf::from("/opt/lm-studio/lm-studio.AppImage"));
+
+            if let Ok(home) = std::env::var("HOME") {
+                let home = PathBuf::from(home);
+                candidates.push(home.join(".local").join("bin").join("lm-studio"));
+                candidates.push(home.join("Applications").join("LM Studio.AppImage"));
+            }
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            candidates.push(PathBuf::from(
+                "/Applications/LM Studio.app/Contents/MacOS/LM Studio",
+            ));
+
+            if let Ok(home) = std::env::var("HOME") {
+                candidates.push(
+                    PathBuf::from(home)
+                        .join("Applications")
+                        .join("LM Studio.app")
+                        .join("Contents")
+                        .join("MacOS")
+                        .join("LM Studio"),
+                );
+            }
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
+                candidates.push(
+                    PathBuf::from(local_app_data)
+                        .join("Programs")
+                        .join("LM Studio")
+                        .join("LM Studio.exe"),
+                );
+            }
+
+            if let Ok(program_files) = std::env::var("ProgramFiles") {
+                candidates.push(
+                    PathBuf::from(program_files)
+                        .join("LM Studio")
+                        .join("LM Studio.exe"),
+                );
+            }
+
+            if let Ok(program_files_x86) = std::env::var("ProgramFiles(x86)") {
+                candidates.push(
+                    PathBuf::from(program_files_x86)
+                        .join("LM Studio")
+                        .join("LM Studio.exe"),
+                );
+            }
+        }
+
+        candidates
+            .into_iter()
+            .find(|candidate| candidate.is_file())
+            .map(|path| path.to_string_lossy().to_string())
+    }
+
     fn is_local_host(&self) -> bool {
         let trimmed = self.base_url.trim();
         trimmed.starts_with("http://127.0.0.1")
@@ -1400,6 +1479,108 @@ impl LmStudioProvider {
             || trimmed.starts_with("https://localhost")
             || trimmed.starts_with("http://[::1]")
             || trimmed.starts_with("https://[::1]")
+    }
+
+    fn wait_for_api_ready(&self, attempts: usize, delay_ms: u64) -> bool {
+        for _ in 0..attempts {
+            if self.api_reachable(800) {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+        }
+        false
+    }
+
+    fn command_output_detail(output: &std::process::Output) -> Option<String> {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+
+        let detail = stderr.trim();
+        if !detail.is_empty() {
+            return Some(detail.to_string());
+        }
+
+        let detail = stdout.trim();
+        if !detail.is_empty() {
+            return Some(detail.to_string());
+        }
+
+        None
+    }
+
+    fn can_auto_launch_app(&self) -> bool {
+        if std::env::var("LMSTUDIO_APP_BIN")
+            .ok()
+            .is_some_and(|raw| !raw.trim().is_empty())
+        {
+            return true;
+        }
+
+        matches!(
+            self.base_url.trim_end_matches('/'),
+            "http://127.0.0.1:1234"
+                | "https://127.0.0.1:1234"
+                | "http://localhost:1234"
+                | "https://localhost:1234"
+                | "http://[::1]:1234"
+                | "https://[::1]:1234"
+        )
+    }
+
+    fn launch_local_app(&self) -> Result<bool, String> {
+        #[cfg(target_os = "macos")]
+        {
+            if let Some(binary) = Self::app_binary() {
+                std::process::Command::new(binary)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                    .map_err(|e| format!("failed to launch LM Studio app: {e}"))?;
+                return Ok(true);
+            }
+
+            std::process::Command::new("open")
+                .args(["-a", "LM Studio"])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .map_err(|e| format!("failed to launch LM Studio app: {e}"))?;
+            Ok(true)
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            let Some(binary) = Self::app_binary() else {
+                return Ok(false);
+            };
+
+            std::process::Command::new(binary)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .map_err(|e| format!("failed to launch LM Studio app: {e}"))?;
+            Ok(true)
+        }
+    }
+
+    fn start_local_server_via_cli(&self, cli: &str) -> Result<(), String> {
+        let output = std::process::Command::new(cli)
+            .args(["server", "start"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .map_err(|e| format!("failed to start LM Studio server: {e}"))?;
+
+        if output.status.success() {
+            return Ok(());
+        }
+
+        let detail = Self::command_output_detail(&output)
+            .unwrap_or_else(|| "LM Studio server start command failed".to_string());
+        Err(format!("failed to start LM Studio server: {detail}"))
     }
 
     fn can_cli_download(model_tag: &str) -> bool {
@@ -1428,15 +1609,30 @@ impl LmStudioProvider {
 
     fn cli_models(&self) -> Option<(HashSet<String>, usize)> {
         let cli = self.cli_binary()?;
-        let output = std::process::Command::new(cli)
-            .args(["ls", "--json"])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .output()
-            .ok()?;
+        if self.is_local_host() {
+            let _ = self.ensure_local_server_running();
+        }
+
+        let run_ls = |cli: &str| {
+            std::process::Command::new(cli)
+                .args(["ls", "--json"])
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .output()
+                .ok()
+        };
+
+        let mut output = run_ls(&cli)?;
+        if !output.status.success() && self.is_local_host() {
+            if self.ensure_local_server_running().is_ok() {
+                output = run_ls(&cli)?;
+            }
+        }
+
         if !output.status.success() {
             return None;
         }
+
         parse_lmstudio_cli_models(&String::from_utf8_lossy(&output.stdout)).ok()
     }
 
@@ -1458,49 +1654,106 @@ impl LmStudioProvider {
             return Ok(true);
         }
 
-        let cli = self
-            .cli_binary()
-            .ok_or_else(|| "LM Studio CLI not found in PATH".to_string())?;
+        let cli = self.cli_binary();
+        let mut failures = Vec::new();
 
-        let output = std::process::Command::new(cli)
-            .args(["server", "start"])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .output()
-            .map_err(|e| format!("failed to start LM Studio server: {e}"))?;
+        if let Some(cli) = cli.as_deref() {
+            match self.start_local_server_via_cli(cli) {
+                Ok(()) => {
+                    if self.wait_for_api_ready(20, 250) {
+                        return Ok(true);
+                    }
+                    failures.push(
+                        "LM Studio server start command succeeded, but the API never became ready"
+                            .to_string(),
+                    );
+                }
+                Err(err) => failures.push(err),
+            }
+        } else {
+            failures.push("LM Studio CLI not found in PATH".to_string());
+        }
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let detail = stderr.trim();
-            let fallback = stdout.trim();
-            return Err(if !detail.is_empty() {
-                format!("failed to start LM Studio server: {detail}")
-            } else if !fallback.is_empty() {
-                format!("failed to start LM Studio server: {fallback}")
+        if !self.can_auto_launch_app() {
+            return Err(if failures.is_empty() {
+                "Failed to start or connect to local LM Studio API server.".to_string()
             } else {
-                "failed to start LM Studio server".to_string()
+                format!(
+                    "Failed to start or connect to local LM Studio API server. {}",
+                    failures.join(" | ")
+                )
             });
         }
 
-        for _ in 0..20 {
-            if self.api_reachable(800) {
-                return Ok(true);
+        match self.launch_local_app() {
+            Ok(true) => {
+                if self.wait_for_api_ready(40, 250) {
+                    return Ok(true);
+                }
+
+                if let Some(cli) = cli.as_deref() {
+                    match self.start_local_server_via_cli(cli) {
+                        Ok(()) => {
+                            if self.wait_for_api_ready(20, 250) {
+                                return Ok(true);
+                            }
+                            failures.push(
+                                "LM Studio app launched, but the API never became ready"
+                                    .to_string(),
+                            );
+                        }
+                        Err(err) => failures.push(err),
+                    }
+                } else {
+                    failures.push(
+                        "LM Studio app launched, but the CLI is unavailable to finish server startup"
+                            .to_string(),
+                    );
+                }
             }
-            std::thread::sleep(std::time::Duration::from_millis(250));
+            Ok(false) => failures.push(
+                "LM Studio app launcher not found; install `lm-studio` or set LMSTUDIO_APP_BIN"
+                    .to_string(),
+            ),
+            Err(err) => failures.push(err),
         }
 
-        Err("LM Studio server did not become ready after startup".to_string())
+        Err(if failures.is_empty() {
+            "Failed to start or connect to local LM Studio API server.".to_string()
+        } else {
+            format!(
+                "Failed to start or connect to local LM Studio API server. {}",
+                failures.join(" | ")
+            )
+        })
+    }
+
+    fn local_install_available(&self) -> bool {
+        self.cli_binary().is_some() || Self::app_binary().is_some()
+    }
+
+    fn seed_cli_bootstrap_progress(&self, tx: &std::sync::mpsc::Sender<PullEvent>) {
+        if self.is_local_host() && !self.api_reachable(800) {
+            let _ = tx.send(PullEvent::Progress {
+                status: "Starting LM Studio...".to_string(),
+                percent: None,
+            });
+        }
+        if self.is_local_host() {
+            let _ = self.ensure_local_server_running();
+        }
     }
 
     fn start_pull_via_cli(&self, model_tag: &str) -> Result<PullHandle, String> {
         let cli = self
             .cli_binary()
             .ok_or_else(|| "LM Studio CLI not found in PATH".to_string())?;
+        let provider = self.clone();
         let tag = model_tag.to_string();
         let (tx, rx) = std::sync::mpsc::channel();
 
         std::thread::spawn(move || {
+            provider.seed_cli_bootstrap_progress(&tx);
             let _ = tx.send(PullEvent::Progress {
                 status: format!("Downloading via LM Studio CLI ({})", tag),
                 percent: None,
@@ -1519,6 +1772,11 @@ impl LmStudioProvider {
     /// Returns `(available, installed_models, count)`.
     pub fn detect_with_installed(&self) -> (bool, HashSet<String>, usize) {
         let mut set = HashSet::new();
+
+        if self.is_local_host() {
+            let _ = self.ensure_local_server_running();
+        }
+
         let Ok(resp) = ureq::get(&self.models_url())
             .config()
             .timeout_global(Some(std::time::Duration::from_millis(800)))
@@ -1528,7 +1786,7 @@ impl LmStudioProvider {
             if let Some((cli_set, cli_count)) = self.cli_models() {
                 return (true, cli_set, cli_count);
             }
-            return (self.cli_binary().is_some(), set, 0);
+            return (self.local_install_available(), set, 0);
         };
 
         let Ok(list) = resp.into_body().read_json::<LmStudioModelList>() else {
@@ -1649,11 +1907,7 @@ fn collect_lmstudio_cli_output<R: Read>(
     lines
 }
 
-fn run_lmstudio_cli_download(
-    cli: String,
-    tag: &str,
-    tx: &std::sync::mpsc::Sender<PullEvent>,
-) {
+fn run_lmstudio_cli_download(cli: String, tag: &str, tx: &std::sync::mpsc::Sender<PullEvent>) {
     let mut child = match std::process::Command::new(cli)
         .args(["get", tag, "--yes"])
         .stdout(std::process::Stdio::piped())
@@ -1675,8 +1929,8 @@ fn run_lmstudio_cli_download(
         let status_tx = tx.clone();
         std::thread::spawn(move || collect_lmstudio_cli_output(stdout, Some(status_tx)))
     });
-    let stderr_handle = stderr
-        .map(|stderr| std::thread::spawn(move || collect_lmstudio_cli_output(stderr, None)));
+    let stderr_handle =
+        stderr.map(|stderr| std::thread::spawn(move || collect_lmstudio_cli_output(stderr, None)));
 
     match child.wait() {
         Ok(status) if status.success() => {
@@ -1713,7 +1967,9 @@ fn run_lmstudio_cli_download(
             if let Some(handle) = stderr_handle {
                 let _ = handle.join();
             }
-            let _ = tx.send(PullEvent::Error(format!("LM Studio CLI download error: {e}")));
+            let _ = tx.send(PullEvent::Error(format!(
+                "LM Studio CLI download error: {e}"
+            )));
         }
     }
 }
@@ -1810,9 +2066,9 @@ fn lmstudio_progress_percent(status: &LmStudioDownloadStatus) -> Option<f64> {
         }
     }
     // Fallback: `progress` field (unofficial / older API versions)
-    status.progress.map(|p| {
-        if p <= 1.0 { p * 100.0 } else { p.min(100.0) }
-    })
+    status
+        .progress
+        .map(|p| if p <= 1.0 { p * 100.0 } else { p.min(100.0) })
 }
 
 fn lmstudio_http_error_is_retryable(error: &ureq::Error) -> bool {
@@ -1829,7 +2085,7 @@ impl ModelProvider for LmStudioProvider {
     }
 
     fn is_available(&self) -> bool {
-        self.api_reachable(2_000) || self.cli_binary().is_some()
+        self.api_reachable(2_000) || self.local_install_available()
     }
 
     fn installed_models(&self) -> HashSet<String> {
@@ -1848,7 +2104,10 @@ impl ModelProvider for LmStudioProvider {
             .filter(|tag| !tag.is_empty())
             .map(ToString::to_string)
             .fold(Vec::new(), |mut acc, tag| {
-                if !acc.iter().any(|existing| existing.eq_ignore_ascii_case(&tag)) {
+                if !acc
+                    .iter()
+                    .any(|existing| existing.eq_ignore_ascii_case(&tag))
+                {
                     acc.push(tag);
                 }
                 acc
@@ -1873,7 +2132,10 @@ impl ModelProvider for LmStudioProvider {
         };
 
         if !api_available && cli_direct_available {
-            if let Some(cli_tag) = candidates.iter().find_map(|tag| Self::cli_fallback_tag(tag)) {
+            if let Some(cli_tag) = candidates
+                .iter()
+                .find_map(|tag| Self::cli_fallback_tag(tag))
+            {
                 return self.start_pull_via_cli(&cli_tag);
             }
         }
@@ -1882,9 +2144,9 @@ impl ModelProvider for LmStudioProvider {
         let download_url = self.download_url();
         let cli = if self.is_local_host() {
             cli_binary.and_then(|cli| {
-                candidates
-                    .iter()
-                    .find_map(|tag| Self::cli_fallback_tag(tag).map(|fallback| (cli.clone(), fallback)))
+                candidates.iter().find_map(|tag| {
+                    Self::cli_fallback_tag(tag).map(|fallback| (cli.clone(), fallback))
+                })
             })
         } else {
             None
@@ -1906,85 +2168,150 @@ impl ModelProvider for LmStudioProvider {
 
                 match resp {
                     Ok(resp) => {
-                    let Ok(dl_resp) = resp.into_body().read_json::<LmStudioDownloadResponse>()
-                    else {
-                        let _ = tx.send(PullEvent::Error(
-                            "Failed to parse LM Studio download response".to_string(),
-                        ));
-                        return;
-                    };
+                        let Ok(dl_resp) = resp.into_body().read_json::<LmStudioDownloadResponse>()
+                        else {
+                            let _ = tx.send(PullEvent::Error(
+                                "Failed to parse LM Studio download response".to_string(),
+                            ));
+                            return;
+                        };
 
-                    if dl_resp.status == "already_downloaded" {
+                        if dl_resp.status == "already_downloaded" {
+                            let _ = tx.send(PullEvent::Progress {
+                                status: "Already downloaded".to_string(),
+                                percent: Some(100.0),
+                            });
+                            let _ = tx.send(PullEvent::Done);
+                            return;
+                        }
+
+                        if dl_resp.status == "failed" {
+                            let _ =
+                                tx.send(PullEvent::Error("LM Studio download failed".to_string()));
+                            return;
+                        }
+
                         let _ = tx.send(PullEvent::Progress {
-                            status: "Already downloaded".to_string(),
-                            percent: Some(100.0),
+                            status: format!(
+                                "Downloading {} via LM Studio ({})",
+                                tag, dl_resp.status
+                            ),
+                            percent: None,
                         });
-                        let _ = tx.send(PullEvent::Done);
-                        return;
-                    }
+                        let job_id = dl_resp.job_id.clone();
+                        if job_id.as_deref().is_none_or(|id| id.trim().is_empty()) {
+                            let _ = tx.send(PullEvent::Error(
+                                "LM Studio download started without a job id".to_string(),
+                            ));
+                            return;
+                        }
+                        let poll_url = provider.download_status_url_for_job(job_id.as_deref());
 
-                    if dl_resp.status == "failed" {
-                        let _ = tx.send(PullEvent::Error("LM Studio download failed".to_string()));
-                        return;
-                    }
+                        // Poll for progress
+                        loop {
+                            std::thread::sleep(std::time::Duration::from_millis(500));
 
-                    let _ = tx.send(PullEvent::Progress {
-                        status: format!("Downloading {} via LM Studio ({})", tag, dl_resp.status),
-                        percent: None,
-                    });
-                    let job_id = dl_resp.job_id.clone();
-                    if job_id.as_deref().is_none_or(|id| id.trim().is_empty()) {
-                        let _ = tx.send(PullEvent::Error(
-                            "LM Studio download started without a job id".to_string(),
-                        ));
-                        return;
-                    }
-                    let poll_url = provider.download_status_url_for_job(job_id.as_deref());
+                            let poll = ureq::get(&poll_url)
+                                .config()
+                                .timeout_global(Some(std::time::Duration::from_secs(10)))
+                                .build()
+                                .call();
 
-                    // Poll for progress
-                    loop {
-                        std::thread::sleep(std::time::Duration::from_millis(500));
+                            match poll {
+                                Ok(resp) => {
+                                    // Try to parse as array (multiple jobs) or single object
+                                    let body_str = match resp.into_body().read_to_string() {
+                                        Ok(s) => s,
+                                        Err(_) => continue,
+                                    };
 
-                        let poll = ureq::get(&poll_url)
-                            .config()
-                            .timeout_global(Some(std::time::Duration::from_secs(10)))
-                            .build()
-                            .call();
+                                    let status_opt = parse_lmstudio_download_status(
+                                        &body_str,
+                                        job_id.as_deref(),
+                                    );
 
-                        match poll {
-                            Ok(resp) => {
-                                // Try to parse as array (multiple jobs) or single object
-                                let body_str = match resp.into_body().read_to_string() {
-                                    Ok(s) => s,
-                                    Err(_) => continue,
-                                };
-
-                                let status_opt =
-                                    parse_lmstudio_download_status(&body_str, job_id.as_deref());
-
-                                let Some(st) = status_opt else {
-                                    let _ = tx.send(PullEvent::Progress {
+                                    let Some(st) = status_opt else {
+                                        let _ = tx.send(PullEvent::Progress {
                                         status: format!(
                                             "Downloading {} via LM Studio (waiting for progress...)",
                                             tag
                                         ),
                                         percent: None,
                                     });
+                                        continue;
+                                    };
+
+                                    let percent = lmstudio_progress_percent(&st);
+
+                                    if st.status == "completed" {
+                                        let _ = tx.send(PullEvent::Progress {
+                                            status: format!("Download complete ({})", tag),
+                                            percent: Some(100.0),
+                                        });
+                                        let _ = tx.send(PullEvent::Done);
+                                        return;
+                                    }
+
+                                    if st.status == "failed" {
+                                        let _ = tx.send(PullEvent::Error(
+                                            "LM Studio download failed".to_string(),
+                                        ));
+                                        return;
+                                    }
+
+                                    let _ = tx.send(PullEvent::Progress {
+                                        status: format!("Downloading {} via LM Studio...", tag),
+                                        percent,
+                                    });
+                                }
+                                Err(_) => {
+                                    let _ = tx.send(PullEvent::Progress {
+                                        status: format!(
+                                            "Downloading {} via LM Studio (checking progress...)",
+                                            tag
+                                        ),
+                                        percent: None,
+                                    });
                                     continue;
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        if lmstudio_http_error_is_retryable(&e) {
+                            candidate_failures.push(format_lmstudio_candidate_failure(tag, &e));
+                            continue;
+                        }
+
+                        if provider.is_local_host()
+                            && provider.ensure_local_server_running().is_ok()
+                        {
+                            let retry_resp = ureq::post(&download_url)
+                                .config()
+                                .timeout_global(Some(std::time::Duration::from_secs(30)))
+                                .build()
+                                .send_json(&body);
+
+                            if let Ok(resp) = retry_resp {
+                                let Ok(dl_resp) =
+                                    resp.into_body().read_json::<LmStudioDownloadResponse>()
+                                else {
+                                    let _ = tx.send(PullEvent::Error(
+                                        "Failed to parse LM Studio download response".to_string(),
+                                    ));
+                                    return;
                                 };
 
-                                let percent = lmstudio_progress_percent(&st);
-
-                                if st.status == "completed" {
-                                let _ = tx.send(PullEvent::Progress {
-                                    status: format!("Download complete ({})", tag),
-                                    percent: Some(100.0),
-                                });
+                                if dl_resp.status == "already_downloaded" {
+                                    let _ = tx.send(PullEvent::Progress {
+                                        status: "Already downloaded".to_string(),
+                                        percent: Some(100.0),
+                                    });
                                     let _ = tx.send(PullEvent::Done);
                                     return;
                                 }
 
-                                if st.status == "failed" {
+                                if dl_resp.status == "failed" {
                                     let _ = tx.send(PullEvent::Error(
                                         "LM Studio download failed".to_string(),
                                     ));
@@ -1992,198 +2319,146 @@ impl ModelProvider for LmStudioProvider {
                                 }
 
                                 let _ = tx.send(PullEvent::Progress {
-                                    status: format!("Downloading {} via LM Studio...", tag),
-                                    percent,
-                                });
-                            }
-                            Err(_) => {
-                                let _ = tx.send(PullEvent::Progress {
                                     status: format!(
-                                        "Downloading {} via LM Studio (checking progress...)",
-                                        tag
+                                        "Downloading {} via LM Studio ({})",
+                                        tag, dl_resp.status
                                     ),
                                     percent: None,
                                 });
-                                continue;
-                            }
-                        }
-                    }
-                    }
-                    Err(e) => {
-                    if lmstudio_http_error_is_retryable(&e) {
-                        candidate_failures.push(format_lmstudio_candidate_failure(tag, &e));
-                        continue;
-                    }
+                                let job_id = dl_resp.job_id.clone();
+                                if job_id.as_deref().is_none_or(|id| id.trim().is_empty()) {
+                                    let _ = tx.send(PullEvent::Error(
+                                        "LM Studio download started without a job id".to_string(),
+                                    ));
+                                    return;
+                                }
+                                let poll_url =
+                                    provider.download_status_url_for_job(job_id.as_deref());
 
-                    if provider.is_local_host()
-                        && provider.ensure_local_server_running().is_ok()
-                    {
-                        let retry_resp = ureq::post(&download_url)
-                            .config()
-                            .timeout_global(Some(std::time::Duration::from_secs(30)))
-                            .build()
-                            .send_json(&body);
+                                loop {
+                                    std::thread::sleep(std::time::Duration::from_millis(500));
 
-                        if let Ok(resp) = retry_resp {
-                            let Ok(dl_resp) = resp.into_body().read_json::<LmStudioDownloadResponse>()
-                            else {
-                                let _ = tx.send(PullEvent::Error(
-                                    "Failed to parse LM Studio download response".to_string(),
-                                ));
-                                return;
-                            };
+                                    let poll = ureq::get(&poll_url)
+                                        .config()
+                                        .timeout_global(Some(std::time::Duration::from_secs(10)))
+                                        .build()
+                                        .call();
 
-                            if dl_resp.status == "already_downloaded" {
-                                let _ = tx.send(PullEvent::Progress {
-                                    status: "Already downloaded".to_string(),
-                                    percent: Some(100.0),
-                                });
-                                let _ = tx.send(PullEvent::Done);
-                                return;
-                            }
+                                    match poll {
+                                        Ok(resp) => {
+                                            let body_str = match resp.into_body().read_to_string() {
+                                                Ok(s) => s,
+                                                Err(_) => continue,
+                                            };
 
-                            if dl_resp.status == "failed" {
-                                let _ = tx.send(PullEvent::Error(
-                                    "LM Studio download failed".to_string(),
-                                ));
-                                return;
-                            }
+                                            let status_opt = parse_lmstudio_download_status(
+                                                &body_str,
+                                                job_id.as_deref(),
+                                            );
 
-                            let _ = tx.send(PullEvent::Progress {
-                                status: format!(
-                                    "Downloading {} via LM Studio ({})",
-                                    tag, dl_resp.status
-                                ),
-                                percent: None,
-                            });
-                            let job_id = dl_resp.job_id.clone();
-                            if job_id.as_deref().is_none_or(|id| id.trim().is_empty()) {
-                                let _ = tx.send(PullEvent::Error(
-                                    "LM Studio download started without a job id".to_string(),
-                                ));
-                                return;
-                            }
-                            let poll_url = provider.download_status_url_for_job(job_id.as_deref());
-
-                            loop {
-                                std::thread::sleep(std::time::Duration::from_millis(500));
-
-                                let poll = ureq::get(&poll_url)
-                                    .config()
-                                    .timeout_global(Some(std::time::Duration::from_secs(10)))
-                                    .build()
-                                    .call();
-
-                                match poll {
-                                    Ok(resp) => {
-                                        let body_str = match resp.into_body().read_to_string() {
-                                            Ok(s) => s,
-                                            Err(_) => continue,
-                                        };
-
-                                        let status_opt = parse_lmstudio_download_status(
-                                            &body_str,
-                                            job_id.as_deref(),
-                                        );
-
-                                        let Some(st) = status_opt else {
-                                            let _ = tx.send(PullEvent::Progress {
+                                            let Some(st) = status_opt else {
+                                                let _ = tx.send(PullEvent::Progress {
                                                 status: format!(
                                                     "Downloading {} via LM Studio (waiting for progress...)",
                                                     tag
                                                 ),
                                                 percent: None,
                                             });
-                                            continue;
-                                        };
+                                                continue;
+                                            };
 
-                                        let percent = lmstudio_progress_percent(&st);
+                                            let percent = lmstudio_progress_percent(&st);
 
-                                        if st.status == "completed" {
+                                            if st.status == "completed" {
+                                                let _ = tx.send(PullEvent::Progress {
+                                                    status: format!("Download complete ({})", tag),
+                                                    percent: Some(100.0),
+                                                });
+                                                let _ = tx.send(PullEvent::Done);
+                                                return;
+                                            }
+
+                                            if st.status == "failed" {
+                                                let _ = tx.send(PullEvent::Error(
+                                                    "LM Studio download failed".to_string(),
+                                                ));
+                                                return;
+                                            }
+
                                             let _ = tx.send(PullEvent::Progress {
-                                                status: format!("Download complete ({})", tag),
-                                                percent: Some(100.0),
+                                                status: format!(
+                                                    "Downloading {} via LM Studio...",
+                                                    tag
+                                                ),
+                                                percent,
                                             });
-                                            let _ = tx.send(PullEvent::Done);
-                                            return;
                                         }
-
-                                        if st.status == "failed" {
-                                            let _ = tx.send(PullEvent::Error(
-                                                "LM Studio download failed".to_string(),
-                                            ));
-                                            return;
-                                        }
-
-                                        let _ = tx.send(PullEvent::Progress {
-                                            status: format!("Downloading {} via LM Studio...", tag),
-                                            percent,
-                                        });
-                                    }
-                                    Err(_) => {
-                                        let _ = tx.send(PullEvent::Progress {
+                                        Err(_) => {
+                                            let _ = tx.send(PullEvent::Progress {
                                             status: format!(
                                                 "Downloading {} via LM Studio (checking progress...)",
                                                 tag
                                             ),
                                             percent: None,
                                         });
-                                        continue;
+                                            continue;
+                                        }
                                     }
                                 }
+                            } else if let Err(retry_err) = retry_resp
+                                && lmstudio_http_error_is_retryable(&retry_err)
+                            {
+                                candidate_failures
+                                    .push(format_lmstudio_candidate_failure(tag, &retry_err));
+                                continue;
                             }
-                        } else if let Err(retry_err) = retry_resp
-                            && lmstudio_http_error_is_retryable(&retry_err)
-                        {
-                            candidate_failures
-                                .push(format_lmstudio_candidate_failure(tag, &retry_err));
-                            continue;
                         }
-                    }
 
-                    if let Some((cli, cli_tag)) = cli.clone() {
-                        let _ = tx.send(PullEvent::Progress {
-                            status: format!("Trying LM Studio CLI fallback ({cli_tag})"),
-                            percent: None,
-                        });
+                        if let Some((cli, cli_tag)) = cli.clone() {
+                            provider.seed_cli_bootstrap_progress(&tx);
+                            let _ = tx.send(PullEvent::Progress {
+                                status: format!("Trying LM Studio CLI fallback ({cli_tag})"),
+                                percent: None,
+                            });
 
-                        let (cli_tx, cli_rx) = std::sync::mpsc::channel();
-                        run_lmstudio_cli_download(cli, &cli_tag, &cli_tx);
+                            let (cli_tx, cli_rx) = std::sync::mpsc::channel();
+                            run_lmstudio_cli_download(cli, &cli_tag, &cli_tx);
 
-                        while let Ok(event) = cli_rx.recv() {
-                            match event {
-                                PullEvent::Error(message) => {
-                                    let _ = tx.send(PullEvent::Error(
-                                        rewrite_lmstudio_cli_error_for_fallback(message),
-                                    ));
-                                    return;
-                                }
-                                other => {
-                                    let done = matches!(other, PullEvent::Done);
-                                    let _ = tx.send(other);
-                                    if done {
+                            while let Ok(event) = cli_rx.recv() {
+                                match event {
+                                    PullEvent::Error(message) => {
+                                        let _ = tx.send(PullEvent::Error(
+                                            rewrite_lmstudio_cli_error_for_fallback(message),
+                                        ));
                                         return;
                                     }
+                                    other => {
+                                        let done = matches!(other, PullEvent::Done);
+                                        let _ = tx.send(other);
+                                        if done {
+                                            return;
+                                        }
+                                    }
                                 }
                             }
+                            return;
                         }
-                        return;
-                    }
 
-                    let _ = tx.send(PullEvent::Error(if candidate_failures.is_empty() {
-                        format!("LM Studio download error: {e}")
-                    } else {
-                        format!(
-                            "LM Studio download failed after trying: {}",
-                            candidate_failures.join(", ")
-                        )
-                    }));
-                    return;
+                        let _ = tx.send(PullEvent::Error(if candidate_failures.is_empty() {
+                            format!("LM Studio download error: {e}")
+                        } else {
+                            format!(
+                                "LM Studio download failed after trying: {}",
+                                candidate_failures.join(", ")
+                            )
+                        }));
+                        return;
                     }
                 }
             }
 
             if let Some((cli, cli_tag)) = cli {
+                provider.seed_cli_bootstrap_progress(&tx);
                 let _ = tx.send(PullEvent::Progress {
                     status: format!("Trying LM Studio CLI fallback ({cli_tag})"),
                     percent: None,
@@ -2370,23 +2645,27 @@ impl ModelProvider for VllmProvider {
 }
 
 pub fn is_model_installed_vllm(hf_name: &str, installed: &HashSet<String>) -> bool {
-    let repo = hf_name.split('/').next_back().unwrap_or(hf_name).to_lowercase();
+    let repo = hf_name
+        .split('/')
+        .next_back()
+        .unwrap_or(hf_name)
+        .to_lowercase();
     let lower = hf_name.to_lowercase();
     installed.contains(&lower)
         || installed.contains(&repo)
-        || installed.iter().any(|name| name.contains(&lower) || name.contains(&repo))
+        || installed
+            .iter()
+            .any(|name| name.contains(&lower) || name.contains(&repo))
 }
 
 // ---------------------------------------------------------------------------
 // LM Studio name-matching helpers
 // ---------------------------------------------------------------------------
 
-const LMSTUDIO_MODEL_MAPPINGS: &[(&str, &str)] = &[
-    (
-        "stelterlab/nvidia-nemotron-3-nano-30b-a3b-awq",
-        "nvidia/nemotron-3-nano",
-    ),
-];
+const LMSTUDIO_MODEL_MAPPINGS: &[(&str, &str)] = &[(
+    "stelterlab/nvidia-nemotron-3-nano-30b-a3b-awq",
+    "nvidia/nemotron-3-nano",
+)];
 
 pub fn hf_name_to_lmstudio_candidates(hf_name: &str) -> Vec<String> {
     let repo = hf_name
@@ -2453,10 +2732,7 @@ pub fn lmstudio_pull_tag(hf_name: &str) -> Option<String> {
         .or_else(|| Some(hf_name.to_string()))
 }
 
-pub fn lmstudio_download_candidates(
-    hf_name: &str,
-    gguf_sources: &[GgufSource],
-) -> Vec<String> {
+pub fn lmstudio_download_candidates(hf_name: &str, gguf_sources: &[GgufSource]) -> Vec<String> {
     let mut candidates = Vec::new();
 
     for source in gguf_sources {
@@ -3269,6 +3545,284 @@ pub fn ollama_pull_tag(hf_name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::fs;
+    #[cfg(unix)]
+    use std::io::{Read, Write};
+    #[cfg(unix)]
+    use std::net::{TcpListener, TcpStream};
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    #[cfg(unix)]
+    use std::path::{Path, PathBuf};
+    #[cfg(unix)]
+    use std::sync::{Mutex, OnceLock, mpsc};
+    #[cfg(unix)]
+    use std::thread;
+    #[cfg(unix)]
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    #[cfg(unix)]
+    fn temp_path(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("llmfit-core-{name}-{nanos}"))
+    }
+
+    #[cfg(unix)]
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = temp_path(name);
+        fs::create_dir_all(&dir).expect("should create temp dir");
+        dir
+    }
+
+    #[cfg(unix)]
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    #[cfg(unix)]
+    fn take_env_lock() -> std::sync::MutexGuard<'static, ()> {
+        match env_lock().lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    #[cfg(unix)]
+    struct EnvGuard {
+        old_host: Option<String>,
+        old_path: Option<String>,
+        old_app_bin: Option<String>,
+    }
+
+    #[cfg(unix)]
+    impl EnvGuard {
+        fn install(host: &str, prepend_path: &Path, app_bin: &Path) -> Self {
+            let old_host = std::env::var("LMSTUDIO_HOST").ok();
+            let old_path = std::env::var("PATH").ok();
+            let old_app_bin = std::env::var("LMSTUDIO_APP_BIN").ok();
+
+            unsafe { std::env::set_var("LMSTUDIO_HOST", host) };
+            unsafe { std::env::set_var("LMSTUDIO_APP_BIN", app_bin) };
+
+            let mut parts = vec![prepend_path.display().to_string()];
+            if let Some(existing) = &old_path {
+                parts.push(existing.clone());
+            }
+            unsafe { std::env::set_var("PATH", parts.join(":")) };
+
+            Self {
+                old_host,
+                old_path,
+                old_app_bin,
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            if let Some(host) = &self.old_host {
+                unsafe { std::env::set_var("LMSTUDIO_HOST", host) };
+            } else {
+                unsafe { std::env::remove_var("LMSTUDIO_HOST") };
+            }
+
+            if let Some(path) = &self.old_path {
+                unsafe { std::env::set_var("PATH", path) };
+            } else {
+                unsafe { std::env::remove_var("PATH") };
+            }
+
+            if let Some(app_bin) = &self.old_app_bin {
+                unsafe { std::env::set_var("LMSTUDIO_APP_BIN", app_bin) };
+            } else {
+                unsafe { std::env::remove_var("LMSTUDIO_APP_BIN") };
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    struct DelayedLmStudioApi {
+        addr: std::net::SocketAddr,
+        stop_tx: Option<mpsc::Sender<()>>,
+        handle: Option<thread::JoinHandle<()>>,
+    }
+
+    #[cfg(unix)]
+    impl DelayedLmStudioApi {
+        fn start(ready_marker: PathBuf, body: &str) -> Self {
+            let reserved = TcpListener::bind("127.0.0.1:0").expect("should reserve a port");
+            let addr = reserved.local_addr().expect("should get local addr");
+            drop(reserved);
+
+            let response_body = body.to_string();
+            let (stop_tx, stop_rx) = mpsc::channel();
+            let handle = thread::spawn(move || {
+                while !ready_marker.exists() {
+                    if stop_rx.try_recv().is_ok() {
+                        return;
+                    }
+                    thread::sleep(Duration::from_millis(10));
+                }
+
+                let listener =
+                    TcpListener::bind(addr).expect("should bind delayed LM Studio test server");
+                listener
+                    .set_nonblocking(true)
+                    .expect("should set delayed server nonblocking");
+
+                loop {
+                    if stop_rx.try_recv().is_ok() {
+                        break;
+                    }
+
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            let path = read_test_request_path(&mut stream).unwrap_or_default();
+                            let (status, content_type, body) = if path == "/v1/models" {
+                                (200, "application/json", response_body.as_str())
+                            } else {
+                                (404, "text/plain", "not found")
+                            };
+                            write_test_response(&mut stream, status, content_type, body);
+                        }
+                        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                            thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+
+            Self {
+                addr,
+                stop_tx: Some(stop_tx),
+                handle: Some(handle),
+            }
+        }
+
+        fn base_url(&self) -> String {
+            format!("http://{}", self.addr)
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for DelayedLmStudioApi {
+        fn drop(&mut self) {
+            if let Some(stop_tx) = self.stop_tx.take() {
+                let _ = stop_tx.send(());
+            }
+            if let Some(handle) = self.handle.take() {
+                let _ = handle.join();
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn read_test_request_path(stream: &mut TcpStream) -> Option<String> {
+        let mut buffer = [0_u8; 1024];
+        let read = stream.read(&mut buffer).ok()?;
+        if read == 0 {
+            return None;
+        }
+
+        let request = String::from_utf8_lossy(&buffer[..read]);
+        let line = request.lines().next()?;
+        let mut parts = line.split_whitespace();
+        let _method = parts.next()?;
+        parts.next().map(ToString::to_string)
+    }
+
+    #[cfg(unix)]
+    fn write_test_response(stream: &mut TcpStream, status: u16, content_type: &str, body: &str) {
+        let status_text = match status {
+            200 => "OK",
+            404 => "Not Found",
+            _ => "OK",
+        };
+        let raw = format!(
+            "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            status,
+            status_text,
+            content_type,
+            body.len(),
+            body
+        );
+        stream
+            .write_all(raw.as_bytes())
+            .expect("should write test response");
+    }
+
+    #[cfg(unix)]
+    struct FakeLmStudioBootstrap {
+        dir: PathBuf,
+        log_path: PathBuf,
+        app_path: PathBuf,
+        _api: DelayedLmStudioApi,
+    }
+
+    #[cfg(unix)]
+    impl FakeLmStudioBootstrap {
+        fn install(
+            name: &str,
+            api_models_body: &str,
+            cli_ls_json: &str,
+            cli_get_script: &str,
+        ) -> Self {
+            let dir = temp_dir(name);
+            let marker_path = dir.join("lmstudio.ready");
+            let log_path = dir.join("lmstudio.log");
+            let lms_path = dir.join("lms");
+            let app_path = dir.join("lm-studio");
+            let api = DelayedLmStudioApi::start(marker_path.clone(), api_models_body);
+
+            let lms_script = format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{}\"\nif [ \"$1\" = \"server\" ] && [ \"$2\" = \"start\" ]; then\n  if [ -f \"{}\" ]; then\n    exit 0\n  fi\n  echo 'Error: LM Studio daemon is not running and no valid installation could be found or installed.' >&2\n  echo 'Error: Failed to start or connect to local LM Studio API server.' >&2\n  exit 1\nfi\nif [ \"$1\" = \"ls\" ] && [ \"$2\" = \"--json\" ]; then\n  if [ -f \"{}\" ]; then\n    cat <<'EOF'\n{}\nEOF\n    exit 0\n  fi\n  echo 'Error: LM Studio daemon is not running and no valid installation could be found or installed.' >&2\n  echo 'Error: Failed to start or connect to local LM Studio API server.' >&2\n  exit 1\nfi\nif [ \"$1\" = \"get\" ]; then\n{}\nfi\necho 'unsupported args' >&2\nexit 1\n",
+                log_path.display(),
+                marker_path.display(),
+                marker_path.display(),
+                cli_ls_json,
+                cli_get_script,
+            );
+            fs::write(&lms_path, lms_script).expect("should write fake lms script");
+
+            let app_script = format!(
+                "#!/bin/sh\nprintf '%s\\n' '__app_launch__' >> \"{}\"\ntouch \"{}\"\nexit 0\n",
+                log_path.display(),
+                marker_path.display(),
+            );
+            fs::write(&app_path, app_script).expect("should write fake LM Studio app script");
+
+            for path in [&lms_path, &app_path] {
+                let mut perms = fs::metadata(path).expect("script metadata").permissions();
+                perms.set_mode(0o755);
+                fs::set_permissions(path, perms).expect("set script perms");
+            }
+
+            Self {
+                dir,
+                log_path,
+                app_path,
+                _api: api,
+            }
+        }
+
+        fn host(&self) -> String {
+            self._api.base_url()
+        }
+
+        fn logged_commands(&self) -> Vec<String> {
+            match fs::read_to_string(&self.log_path) {
+                Ok(raw) => raw.lines().map(|line| line.to_string()).collect(),
+                Err(_) => Vec::new(),
+            }
+        }
+    }
 
     #[test]
     fn test_hf_name_to_mlx_candidates() {
@@ -4090,20 +4644,26 @@ mod tests {
 
     #[test]
     fn test_lmstudio_cli_progress_percent_parses_real_progress_bar_output() {
-        let line = "⠋ [████████████▌         ]  57.23% |  2.67 GB /  4.68 GB |  45.12 MB/s | ETA 00:43";
+        let line =
+            "⠋ [████████████▌         ]  57.23% |  2.67 GB /  4.68 GB |  45.12 MB/s | ETA 00:43";
         let pct = lmstudio_cli_progress_percent(line).expect("should parse percent");
         assert!((pct - 57.23).abs() < 0.001, "expected 57.23, got {pct}");
     }
 
     #[test]
     fn test_lmstudio_cli_progress_percent_ignores_non_percent_lines() {
-        assert_eq!(lmstudio_cli_progress_percent("Resolving download plan..."), None);
+        assert_eq!(
+            lmstudio_cli_progress_percent("Resolving download plan..."),
+            None
+        );
         assert_eq!(
             lmstudio_cli_progress_percent("Finalizing download..."),
             None
         );
         assert_eq!(
-            lmstudio_cli_progress_percent("↓ To download: model Meta-Llama-3.1-8B-Instruct Q4_K_M [GGUF] - 4.68 GB"),
+            lmstudio_cli_progress_percent(
+                "↓ To download: model Meta-Llama-3.1-8B-Instruct Q4_K_M [GGUF] - 4.68 GB"
+            ),
             None
         );
     }
@@ -4173,6 +4733,55 @@ mod tests {
         assert!(!remote.is_local_host());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn test_lmstudio_ensure_local_server_running_launches_app_when_daemon_is_down() {
+        let _env_lock = take_env_lock();
+        let fake = FakeLmStudioBootstrap::install(
+            "lmstudio-bootstrap-start",
+            r#"{"models":[{"key":"lmstudio-community/smollm3-3b-gguf"}]}"#,
+            r#"[{"modelKey":"lmstudio-community/smollm3-3b-gguf"}]"#,
+            "exit 0",
+        );
+        let _env = EnvGuard::install(&fake.host(), &fake.dir, &fake.app_path);
+
+        let provider = LmStudioProvider::new();
+        assert!(
+            provider
+                .ensure_local_server_running()
+                .expect("should bootstrap local LM Studio API"),
+        );
+
+        let commands = fake.logged_commands();
+        assert!(commands.iter().any(|cmd| cmd == "server start"));
+        assert!(commands.iter().any(|cmd| cmd == "__app_launch__"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_lmstudio_detect_with_installed_bootstraps_local_api() {
+        let _env_lock = take_env_lock();
+        let fake = FakeLmStudioBootstrap::install(
+            "lmstudio-bootstrap-detect",
+            r#"{"models":[{"key":"lmstudio-community/smollm3-3b-gguf"}]}"#,
+            r#"[{"modelKey":"lmstudio-community/smollm3-3b-gguf"}]"#,
+            "exit 0",
+        );
+        let _env = EnvGuard::install(&fake.host(), &fake.dir, &fake.app_path);
+
+        let provider = LmStudioProvider::new();
+        let (available, installed, count) = provider.detect_with_installed();
+
+        assert!(available);
+        assert_eq!(count, 1);
+        assert!(installed.contains("lmstudio-community/smollm3-3b-gguf"));
+        assert!(installed.contains("smollm3-3b-gguf"));
+
+        let commands = fake.logged_commands();
+        assert!(commands.iter().any(|cmd| cmd == "server start"));
+        assert!(commands.iter().any(|cmd| cmd == "__app_launch__"));
+    }
+
     #[test]
     fn test_lmstudio_pull_tag_uses_known_mapping() {
         assert_eq!(
@@ -4233,6 +4842,9 @@ mod tests {
             "meta-llama/Llama-3.1-8B-Instruct",
             &installed
         ));
-        assert!(!is_model_installed_vllm("google/gemma-3-12b-it", &installed));
+        assert!(!is_model_installed_vllm(
+            "google/gemma-3-12b-it",
+            &installed
+        ));
     }
 }
