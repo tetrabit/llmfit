@@ -8,8 +8,14 @@ pub const QUANT_HIERARCHY: &[&str] = &["Q8_0", "Q6_K", "Q5_K_M", "Q4_K_M", "Q3_K
 /// MLX-native quantization hierarchy (best quality to most compressed).
 pub const MLX_QUANT_HIERARCHY: &[&str] = &["mlx-8bit", "mlx-4bit"];
 
-/// Bytes per parameter for each quantization level.
-pub fn quant_bpp(quant: &str) -> f64 {
+/// Bytes per parameter for GGUF quantization levels.
+///
+/// Returns the approximate bytes-per-parameter (BPP) for a given quantization
+/// format string. Primarily covers GGUF quant levels (Q8_0, Q6_K, Q4_K_M, etc.)
+/// but also includes entries for MLX, AWQ, and GPTQ formats for convenience.
+///
+/// Used by memory estimation functions to compute model size in GB.
+pub fn gguf_quant_bpp(quant: &str) -> f64 {
     match quant {
         "F32" => 4.0,
         "F16" | "BF16" => 2.0,
@@ -502,7 +508,7 @@ impl LlmModel {
 
     /// Bytes-per-parameter for the model's quantization level.
     fn quant_bpp(&self) -> f64 {
-        quant_bpp(&self.quantization)
+        gguf_quant_bpp(&self.quantization)
     }
 
     /// Parameter count in billions, extracted from parameters_raw or parameter_count.
@@ -525,7 +531,7 @@ impl LlmModel {
     /// Estimate memory required (GB) at a given quantization and context length.
     /// Formula: model_weights + KV_cache + runtime_overhead
     pub fn estimate_memory_gb(&self, quant: &str, ctx: u32) -> f64 {
-        let bpp = quant_bpp(quant);
+        let bpp = gguf_quant_bpp(quant);
         let params = self.params_b();
         let model_mem = params * bpp;
         // KV cache: ~0.000008 GB per billion params per context token
@@ -576,7 +582,7 @@ impl LlmModel {
         }
         let active_params = self.active_parameters? as f64;
         let bpp = self.quant_bpp();
-        let size_gb = (active_params * bpp) / (1024.0 * 1024.0 * 1024.0);
+        let size_gb = (active_params * bpp) / 1_000_000_000.0;
         Some((size_gb * 1.1).max(0.5))
     }
 
@@ -599,7 +605,7 @@ impl LlmModel {
             return Some(0.0);
         }
         let bpp = self.quant_bpp();
-        Some((inactive * bpp) / (1024.0 * 1024.0 * 1024.0))
+        Some((inactive * bpp) / 1_000_000_000.0)
     }
 }
 
@@ -914,8 +920,8 @@ mod tests {
 
     #[test]
     fn test_mlx_quant_bpp_values() {
-        assert_eq!(quant_bpp("mlx-4bit"), 0.55);
-        assert_eq!(quant_bpp("mlx-8bit"), 1.0);
+        assert_eq!(gguf_quant_bpp("mlx-4bit"), 0.55);
+        assert_eq!(gguf_quant_bpp("mlx-8bit"), 1.0);
         assert_eq!(quant_speed_multiplier("mlx-4bit"), 1.15);
         assert_eq!(quant_speed_multiplier("mlx-8bit"), 0.85);
         assert_eq!(quant_quality_penalty("mlx-4bit"), -4.0);
@@ -964,13 +970,13 @@ mod tests {
 
     #[test]
     fn test_quant_bpp() {
-        assert_eq!(quant_bpp("F32"), 4.0);
-        assert_eq!(quant_bpp("F16"), 2.0);
-        assert_eq!(quant_bpp("Q8_0"), 1.05);
-        assert_eq!(quant_bpp("Q4_K_M"), 0.58);
-        assert_eq!(quant_bpp("Q2_K"), 0.37);
+        assert_eq!(gguf_quant_bpp("F32"), 4.0);
+        assert_eq!(gguf_quant_bpp("F16"), 2.0);
+        assert_eq!(gguf_quant_bpp("Q8_0"), 1.05);
+        assert_eq!(gguf_quant_bpp("Q4_K_M"), 0.58);
+        assert_eq!(gguf_quant_bpp("Q2_K"), 0.37);
         // Unknown quant defaults to Q4_K_M
-        assert_eq!(quant_bpp("UNKNOWN"), 0.58);
+        assert_eq!(gguf_quant_bpp("UNKNOWN"), 0.58);
     }
 
     #[test]
@@ -1623,15 +1629,15 @@ mod tests {
     #[test]
     fn test_awq_gptq_quant_values() {
         // AWQ
-        assert_eq!(quant_bpp("AWQ-4bit"), 0.5);
-        assert_eq!(quant_bpp("AWQ-8bit"), 1.0);
+        assert_eq!(gguf_quant_bpp("AWQ-4bit"), 0.5);
+        assert_eq!(gguf_quant_bpp("AWQ-8bit"), 1.0);
         assert_eq!(quant_speed_multiplier("AWQ-4bit"), 1.2);
         assert_eq!(quant_speed_multiplier("AWQ-8bit"), 0.85);
         assert_eq!(quant_quality_penalty("AWQ-4bit"), -3.0);
         assert_eq!(quant_quality_penalty("AWQ-8bit"), 0.0);
         // GPTQ
-        assert_eq!(quant_bpp("GPTQ-Int4"), 0.5);
-        assert_eq!(quant_bpp("GPTQ-Int8"), 1.0);
+        assert_eq!(gguf_quant_bpp("GPTQ-Int4"), 0.5);
+        assert_eq!(gguf_quant_bpp("GPTQ-Int8"), 1.0);
         assert_eq!(quant_speed_multiplier("GPTQ-Int4"), 1.2);
         assert_eq!(quant_speed_multiplier("GPTQ-Int8"), 0.85);
         assert_eq!(quant_quality_penalty("GPTQ-Int4"), -3.0);

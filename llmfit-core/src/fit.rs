@@ -187,16 +187,25 @@ impl ModelFit {
             let pool = system.total_gpu_vram_gb.unwrap_or(0.0);
             let tp_size = system.cluster_node_count;
             if let Some((_, best_mem)) = choose_quant(pool) {
-                notes.push(format!(
-                    "Cluster: tensor-parallel across {} nodes via vLLM (TP={})",
-                    tp_size, tp_size
-                ));
+                if tp_size > 1 {
+                    notes.push(format!(
+                        "Cluster: tensor-parallel across {} nodes via vLLM (TP={})",
+                        tp_size, tp_size
+                    ));
+                }
                 (RunMode::TensorParallel, best_mem, pool)
             } else {
-                notes.push(format!(
-                    "Cluster: {} nodes but model exceeds aggregate VRAM ({:.1} GB)",
-                    tp_size, pool
-                ));
+                if tp_size > 1 {
+                    notes.push(format!(
+                        "Cluster: {} nodes but model exceeds aggregate VRAM ({:.1} GB)",
+                        tp_size, pool
+                    ));
+                } else {
+                    notes.push(format!(
+                        "Cluster: model exceeds aggregate VRAM ({:.1} GB)",
+                        pool
+                    ));
+                }
                 (RunMode::TensorParallel, default_mem_required, pool)
             }
         } else if system.has_gpu {
@@ -214,7 +223,11 @@ impl ModelFit {
                         ));
                     }
                     if model.is_moe {
-                        (RunMode::Gpu, min_vram, pool)
+                        if let Some((_, best_mem)) = choose_quant(pool) {
+                            (RunMode::Gpu, best_mem, pool)
+                        } else {
+                            (RunMode::Gpu, min_vram, pool)
+                        }
                     } else if let Some((_, best_mem)) = choose_quant(pool) {
                         (RunMode::Gpu, best_mem, pool)
                     } else {
@@ -584,11 +597,11 @@ fn moe_memory_for_quant(model: &LlmModel, quant: &str) -> Option<(f64, f64)> {
 
     let active_params = model.active_parameters? as f64;
     let total_params = model.parameters_raw? as f64;
-    let bpp = models::quant_bpp(quant);
+    let bpp = models::gguf_quant_bpp(quant);
 
-    let active_vram = ((active_params * bpp) / (1024.0 * 1024.0 * 1024.0) * 1.1).max(0.5);
+    let active_vram = ((active_params * bpp) / 1_000_000_000.0 * 1.1).max(0.5);
     let inactive_params = (total_params - active_params).max(0.0);
-    let offloaded_ram = (inactive_params * bpp) / (1024.0 * 1024.0 * 1024.0);
+    let offloaded_ram = (inactive_params * bpp) / 1_000_000_000.0;
 
     Some((active_vram, offloaded_ram))
 }
@@ -1011,24 +1024,36 @@ fn speed_score(tps: f64, use_case: UseCase) -> f64 {
 }
 
 /// Fit score: how well the model fills available memory without exceeding.
+///
+/// Uses a smooth polynomial curve instead of step functions to avoid
+/// discontinuities. Peak score at ~75% utilization, smooth rolloff on
+/// both sides.
 fn fit_score(required: f64, available: f64) -> f64 {
     if available <= 0.0 || required > available {
         return 0.0;
     }
     let ratio = required / available;
-    // Sweet spot: 50-80% utilization scores highest
-    if ratio <= 0.5 {
-        // Under-utilizing: still good but not optimal
-        60.0 + (ratio / 0.5) * 40.0
-    } else if ratio <= 0.8 {
-        100.0
-    } else if ratio <= 0.9 {
-        // Getting tight
-        70.0
+    // Smooth bell-like curve centered around 0.75 utilization.
+    // Uses a quartic (degree-4) polynomial for a smooth peak with gentle
+    // tails, avoiding any cliffs or discontinuities.
+    //
+    // - Below 0.3: ramps up from ~60
+    // - 0.5-0.85: high plateau region (95-100)
+    // - Peak at ~0.75: 100
+    // - 0.85-0.95: smooth decline
+    // - Above 0.95: drops towards 40
+    let center = 0.75;
+    let d = ratio - center;
+    // Asymmetric bell curve: gentler penalty for under-utilization,
+    // steeper penalty for over-utilization (memory pressure).
+    let score = if d < 0.0 {
+        // Under-utilized side: quadratic rolloff
+        100.0 - 120.0 * d * d
     } else {
-        // Very tight
-        50.0
-    }
+        // Over-utilized side: quadratic + quartic for steep penalty
+        100.0 - 500.0 * d * d - 8000.0 * d * d * d * d
+    };
+    score.clamp(40.0, 100.0)
 }
 
 /// Context score: context window capability vs target for the use case.
@@ -1408,12 +1433,21 @@ mod tests {
 
     #[test]
     fn test_fit_score_sweet_spot() {
-        // Sweet spot: 50-80% utilization
-        let score = fit_score(6.0, 10.0);
-        assert!(score >= 95.0); // Should be near perfect
+        // Sweet spot: 60-80% utilization scores highest
+        let score = fit_score(6.0, 10.0); // 60% — near peak
+        assert!(score >= 90.0, "60% util should score >=90, got {score}");
 
-        let score2 = fit_score(8.0, 10.0);
+        let score2 = fit_score(7.5, 10.0); // 75% — peak
         assert_eq!(score2, 100.0);
+
+        let score3 = fit_score(8.0, 10.0); // 80% — still high, no cliff
+        assert!(score3 >= 95.0, "80% util should score >=95, got {score3}");
+
+        // Verify smoothness: no large jump between 79% and 81%
+        let at_79 = fit_score(7.9, 10.0);
+        let at_81 = fit_score(8.1, 10.0);
+        let gap = (at_79 - at_81).abs();
+        assert!(gap < 5.0, "Score gap 79%→81% should be <5, got {gap}");
     }
 
     #[test]
@@ -1426,10 +1460,10 @@ mod tests {
 
     #[test]
     fn test_fit_score_tight() {
-        // Very tight fit
+        // Very tight fit (95%)
         let score = fit_score(9.5, 10.0);
-        assert!(score >= 50.0);
-        assert!(score < 80.0);
+        assert!(score >= 40.0, "95% util should score >=40, got {score}");
+        assert!(score < 80.0, "95% util should score <80, got {score}");
     }
 
     #[test]
@@ -1996,5 +2030,89 @@ mod tests {
         let model = test_model("7B", 4.0, Some(4.0));
         let v100_sys = test_system_with_gpu(64.0, 16.0, "Tesla V100-PCIE-16GB");
         assert!(backend_compatible(&model, &v100_sys));
+    }
+
+    #[test]
+    fn test_moe_unified_memory_gets_dynamic_quant() {
+        // MoE model on unified memory where default quant doesn't fit but lower does.
+        let model = LlmModel {
+            name: "MoE Unified Test".to_string(),
+            provider: "Test".to_string(),
+            parameter_count: "8x7B".to_string(),
+            parameters_raw: Some(46_700_000_000),
+            min_ram_gb: 25.0,
+            recommended_ram_gb: 50.0,
+            min_vram_gb: Some(25.0),
+            quantization: "Q8_0".to_string(),
+            context_length: 4096,
+            use_case: "General".to_string(),
+            is_moe: true,
+            num_experts: Some(8),
+            active_experts: Some(2),
+            active_parameters: Some(12_900_000_000),
+            release_date: None,
+            gguf_sources: vec![],
+            capabilities: vec![],
+            format: models::ModelFormat::default(),
+            num_attention_heads: None,
+            num_key_value_heads: None,
+            metadata_overlay: None,
+            license: None,
+        };
+        // 36 GB unified pool — Q8 needs ~25 GB, so a lower quant should be selected
+        let mut system = test_system(36.0, true, Some(36.0));
+        system.backend = GpuBackend::Metal;
+        system.unified_memory = true;
+
+        let fit = ModelFit::analyze(&model, &system);
+
+        // Should use GPU mode on unified memory
+        assert_eq!(fit.run_mode, RunMode::Gpu);
+        // Should have selected a quantization that fits the pool
+        assert!(
+            fit.memory_required_gb <= fit.memory_available_gb,
+            "MoE on unified should pick a quant that fits: req={} avail={}",
+            fit.memory_required_gb,
+            fit.memory_available_gb,
+        );
+    }
+
+    #[test]
+    fn test_cluster_node_count_zero_no_tp_note() {
+        // Cluster mode with node_count=0 should not produce a TP=0 note.
+        let model = test_model("7B", 4.0, Some(4.0));
+        let mut system = test_system(64.0, true, Some(48.0));
+        system.cluster_mode = true;
+        system.cluster_node_count = 0;
+        system.total_gpu_vram_gb = Some(48.0);
+
+        let fit = ModelFit::analyze(&model, &system);
+
+        // Should NOT contain "TP=0"
+        for note in &fit.notes {
+            assert!(
+                !note.contains("TP=0"),
+                "Cluster with node_count=0 should not produce TP=0 note, got: {note}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_cluster_node_count_positive_has_tp_note() {
+        // Cluster mode with node_count>1 should produce a note mentioning the node count.
+        let model = test_model("7B", 4.0, Some(4.0));
+        let mut system = test_system(64.0, true, Some(48.0));
+        system.cluster_mode = true;
+        system.cluster_node_count = 4;
+        system.total_gpu_vram_gb = Some(48.0);
+
+        let fit = ModelFit::analyze(&model, &system);
+
+        // Should mention the cluster node count in some note
+        assert!(
+            fit.notes.iter().any(|n| n.contains("4 nodes")),
+            "Cluster with 4 nodes should mention node count, got: {:?}",
+            fit.notes
+        );
     }
 }
