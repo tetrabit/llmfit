@@ -2210,34 +2210,42 @@ fn draw_popup_frame(frame: &mut Frame, content_width: u16, item_count: usize) ->
     (popup_area, inner_height)
 }
 
-fn draw_provider_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
-    let max_name_len = app.providers.iter().map(|p| p.len()).max().unwrap_or(10);
-    let (popup_area, inner_height) =
-        draw_popup_frame(frame, max_name_len as u16 + 10, app.providers.len());
-    let total = app.providers.len();
+/// Generic checkbox popup: draws a centered, scrollable multi-select list.
+///
+/// `items` and `selected` must have the same length. `cursor` is the
+/// highlighted row index.  Optional `bottom_bar` renders a footer line
+/// (e.g. "a: all | c: clear").
+fn draw_checkbox_popup<'a>(
+    frame: &mut Frame,
+    items: &[&str],
+    selected: &[bool],
+    cursor: usize,
+    title_prefix: &str,
+    tc: &ThemeColors,
+    bottom_bar: Option<Line<'a>>,
+) {
+    let max_name_len = items.iter().map(|s| s.len()).max().unwrap_or(10);
+    let (popup_area, inner_height) = draw_popup_frame(frame, max_name_len as u16 + 10, items.len());
+    let total = items.len();
 
-    let scroll_offset = if app.provider_cursor >= inner_height {
-        app.provider_cursor - inner_height + 1
+    let scroll_offset = if cursor >= inner_height {
+        cursor - inner_height + 1
     } else {
         0
     };
 
-    let lines: Vec<Line> = app
-        .providers
+    let lines: Vec<Line> = items
         .iter()
+        .zip(selected.iter())
         .enumerate()
         .skip(scroll_offset)
         .take(inner_height)
-        .map(|(i, name)| {
-            let checkbox = if app.selected_providers[i] {
-                "[x]"
-            } else {
-                "[ ]"
-            };
-            let is_cursor = i == app.provider_cursor;
+        .map(|(i, (name, &is_selected))| {
+            let checkbox = if is_selected { "[x]" } else { "[ ]" };
+            let is_cursor = i == cursor;
 
             let style = if is_cursor {
-                if app.selected_providers[i] {
+                if is_selected {
                     Style::default()
                         .fg(tc.good)
                         .add_modifier(Modifier::BOLD)
@@ -2248,7 +2256,7 @@ fn draw_provider_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
                         .add_modifier(Modifier::BOLD)
                         .bg(tc.highlight_bg)
                 }
-            } else if app.selected_providers[i] {
+            } else if is_selected {
                 Style::default().fg(tc.good)
             } else {
                 Style::default().fg(tc.muted)
@@ -2258,10 +2266,10 @@ fn draw_provider_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
         })
         .collect();
 
-    let active_count = app.selected_providers.iter().filter(|&&s| s).count();
-    let title = format!(" Providers ({}/{}) ", active_count, total);
+    let active_count = selected.iter().filter(|&&s| s).count();
+    let title = format!(" {} ({}/{}) ", title_prefix, active_count, total);
 
-    let block = Block::default()
+    let mut block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(tc.accent_secondary))
         .title(title)
@@ -2269,185 +2277,79 @@ fn draw_provider_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
             Style::default()
                 .fg(tc.accent_secondary)
                 .add_modifier(Modifier::BOLD),
-        )
-        .title_bottom(
-            Line::from(vec![
-                Span::styled(
-                    " a",
-                    Style::default()
-                        .fg(tc.accent_secondary)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(": all | ", Style::default().fg(tc.muted)),
-                Span::styled(
-                    "c",
-                    Style::default()
-                        .fg(tc.accent_secondary)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(": clear ", Style::default().fg(tc.muted)),
-            ])
-            .centered(),
         );
+    if let Some(bar) = bottom_bar {
+        block = block.title_bottom(bar);
+    }
 
     let paragraph = Paragraph::new(lines).block(block);
     frame.render_widget(paragraph, popup_area);
+}
+
+fn draw_provider_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
+    let labels: Vec<&str> = app.providers.iter().map(|s| s.as_str()).collect();
+    let bottom = Line::from(vec![
+        Span::styled(
+            " a",
+            Style::default()
+                .fg(tc.accent_secondary)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(": all | ", Style::default().fg(tc.muted)),
+        Span::styled(
+            "c",
+            Style::default()
+                .fg(tc.accent_secondary)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(": clear ", Style::default().fg(tc.muted)),
+    ])
+    .centered();
+    draw_checkbox_popup(
+        frame,
+        &labels,
+        &app.selected_providers,
+        app.provider_cursor,
+        "Providers",
+        tc,
+        Some(bottom),
+    );
 }
 
 fn draw_use_case_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
-    let max_name_len = app
+    let labels: Vec<String> = app
         .use_cases
         .iter()
-        .map(|uc| uc.label().len())
-        .max()
-        .unwrap_or(10);
-    let (popup_area, inner_height) =
-        draw_popup_frame(frame, max_name_len as u16 + 10, app.use_cases.len());
-    let total = app.use_cases.len();
-
-    let scroll_offset = if app.use_case_cursor >= inner_height {
-        app.use_case_cursor - inner_height + 1
-    } else {
-        0
-    };
-
-    let lines: Vec<Line> = app
-        .use_cases
-        .iter()
-        .enumerate()
-        .skip(scroll_offset)
-        .take(inner_height)
-        .map(|(i, use_case)| {
-            let checkbox = if app.selected_use_cases[i] {
-                "[x]"
-            } else {
-                "[ ]"
-            };
-            let is_cursor = i == app.use_case_cursor;
-
-            let style = if is_cursor {
-                if app.selected_use_cases[i] {
-                    Style::default()
-                        .fg(tc.good)
-                        .add_modifier(Modifier::BOLD)
-                        .bg(tc.highlight_bg)
-                } else {
-                    Style::default()
-                        .fg(tc.fg)
-                        .add_modifier(Modifier::BOLD)
-                        .bg(tc.highlight_bg)
-                }
-            } else if app.selected_use_cases[i] {
-                Style::default().fg(tc.good)
-            } else {
-                Style::default().fg(tc.muted)
-            };
-
-            Line::from(Span::styled(
-                format!(" {} {}", checkbox, use_case.label()),
-                style,
-            ))
-        })
+        .map(|uc| uc.label().to_string())
         .collect();
-
-    let active_count = app.selected_use_cases.iter().filter(|&&s| s).count();
-    let title = format!(" Use Cases ({}/{}) ", active_count, total);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(tc.accent_secondary))
-        .title(title)
-        .title_style(
-            Style::default()
-                .fg(tc.accent_secondary)
-                .add_modifier(Modifier::BOLD),
-        );
-
-    let paragraph = Paragraph::new(lines).block(block);
-    frame.render_widget(paragraph, popup_area);
+    let refs: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
+    draw_checkbox_popup(
+        frame,
+        &refs,
+        &app.selected_use_cases,
+        app.use_case_cursor,
+        "Use Cases",
+        tc,
+        None,
+    );
 }
 
 fn draw_capability_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
-    let area = frame.area();
-
-    let max_name_len = app
+    let labels: Vec<String> = app
         .capabilities
         .iter()
-        .map(|c| c.label().len())
-        .max()
-        .unwrap_or(10);
-    let popup_width = (max_name_len as u16 + 10).min(area.width.saturating_sub(4));
-    let popup_height = (app.capabilities.len() as u16 + 2).min(area.height.saturating_sub(4));
-
-    let x = area.x + (area.width.saturating_sub(popup_width)) / 2;
-    let y = area.y + (area.height.saturating_sub(popup_height)) / 2;
-    let popup_area = Rect::new(x, y, popup_width, popup_height);
-
-    frame.render_widget(Clear, popup_area);
-
-    let inner_height = popup_height.saturating_sub(2) as usize;
-    let total = app.capabilities.len();
-
-    let scroll_offset = if app.capability_cursor >= inner_height {
-        app.capability_cursor - inner_height + 1
-    } else {
-        0
-    };
-
-    let lines: Vec<Line> = app
-        .capabilities
-        .iter()
-        .enumerate()
-        .skip(scroll_offset)
-        .take(inner_height)
-        .map(|(i, cap)| {
-            let checkbox = if app.selected_capabilities[i] {
-                "[x]"
-            } else {
-                "[ ]"
-            };
-            let is_cursor = i == app.capability_cursor;
-
-            let style = if is_cursor {
-                if app.selected_capabilities[i] {
-                    Style::default()
-                        .fg(tc.good)
-                        .add_modifier(Modifier::BOLD)
-                        .bg(tc.highlight_bg)
-                } else {
-                    Style::default()
-                        .fg(tc.fg)
-                        .add_modifier(Modifier::BOLD)
-                        .bg(tc.highlight_bg)
-                }
-            } else if app.selected_capabilities[i] {
-                Style::default().fg(tc.good)
-            } else {
-                Style::default().fg(tc.muted)
-            };
-
-            Line::from(Span::styled(
-                format!(" {} {}", checkbox, cap.label()),
-                style,
-            ))
-        })
+        .map(|c| c.label().to_string())
         .collect();
-
-    let active_count = app.selected_capabilities.iter().filter(|&&s| s).count();
-    let title = format!(" Capabilities ({}/{}) ", active_count, total);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(tc.accent_secondary))
-        .title(title)
-        .title_style(
-            Style::default()
-                .fg(tc.accent_secondary)
-                .add_modifier(Modifier::BOLD),
-        );
-
-    let paragraph = Paragraph::new(lines).block(block);
-    frame.render_widget(paragraph, popup_area);
+    let refs: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
+    draw_checkbox_popup(
+        frame,
+        &refs,
+        &app.selected_capabilities,
+        app.capability_cursor,
+        "Capabilities",
+        tc,
+        None,
+    );
 }
 
 fn draw_download_provider_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
@@ -2719,262 +2621,53 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
 }
 
 fn draw_quant_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
-    let max_name_len = app.quants.iter().map(|q| q.len()).max().unwrap_or(10);
-    let (popup_area, inner_height) =
-        draw_popup_frame(frame, max_name_len as u16 + 10, app.quants.len());
-    let total = app.quants.len();
-
-    let scroll_offset = if app.quant_cursor >= inner_height {
-        app.quant_cursor - inner_height + 1
-    } else {
-        0
-    };
-
-    let lines: Vec<Line> = app
-        .quants
-        .iter()
-        .enumerate()
-        .skip(scroll_offset)
-        .take(inner_height)
-        .map(|(i, name)| {
-            let checkbox = if app.selected_quants[i] { "[x]" } else { "[ ]" };
-            let is_cursor = i == app.quant_cursor;
-
-            let style = if is_cursor {
-                if app.selected_quants[i] {
-                    Style::default()
-                        .fg(tc.good)
-                        .add_modifier(Modifier::BOLD)
-                        .bg(tc.highlight_bg)
-                } else {
-                    Style::default()
-                        .fg(tc.fg)
-                        .add_modifier(Modifier::BOLD)
-                        .bg(tc.highlight_bg)
-                }
-            } else if app.selected_quants[i] {
-                Style::default().fg(tc.good)
-            } else {
-                Style::default().fg(tc.muted)
-            };
-
-            Line::from(Span::styled(format!(" {} {}", checkbox, name), style))
-        })
-        .collect();
-
-    let active_count = app.selected_quants.iter().filter(|&&s| s).count();
-    let title = format!(" Quant ({}/{}) ", active_count, total);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(tc.accent_secondary))
-        .title(title)
-        .title_style(
-            Style::default()
-                .fg(tc.accent_secondary)
-                .add_modifier(Modifier::BOLD),
-        );
-
-    let paragraph = Paragraph::new(lines).block(block);
-    frame.render_widget(paragraph, popup_area);
+    let labels: Vec<&str> = app.quants.iter().map(|s| s.as_str()).collect();
+    draw_checkbox_popup(
+        frame,
+        &labels,
+        &app.selected_quants,
+        app.quant_cursor,
+        "Quant",
+        tc,
+        None,
+    );
 }
 
 fn draw_run_mode_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
-    let max_name_len = app.run_modes.iter().map(|m| m.len()).max().unwrap_or(10);
-    let (popup_area, inner_height) =
-        draw_popup_frame(frame, max_name_len as u16 + 10, app.run_modes.len());
-    let total = app.run_modes.len();
-
-    let scroll_offset = if app.run_mode_cursor >= inner_height {
-        app.run_mode_cursor - inner_height + 1
-    } else {
-        0
-    };
-
-    let lines: Vec<Line> = app
-        .run_modes
-        .iter()
-        .enumerate()
-        .skip(scroll_offset)
-        .take(inner_height)
-        .map(|(i, name)| {
-            let checkbox = if app.selected_run_modes[i] {
-                "[x]"
-            } else {
-                "[ ]"
-            };
-            let is_cursor = i == app.run_mode_cursor;
-
-            let style = if is_cursor {
-                if app.selected_run_modes[i] {
-                    Style::default()
-                        .fg(tc.good)
-                        .add_modifier(Modifier::BOLD)
-                        .bg(tc.highlight_bg)
-                } else {
-                    Style::default()
-                        .fg(tc.fg)
-                        .add_modifier(Modifier::BOLD)
-                        .bg(tc.highlight_bg)
-                }
-            } else if app.selected_run_modes[i] {
-                Style::default().fg(tc.good)
-            } else {
-                Style::default().fg(tc.muted)
-            };
-
-            Line::from(Span::styled(format!(" {} {}", checkbox, name), style))
-        })
-        .collect();
-
-    let active_count = app.selected_run_modes.iter().filter(|&&s| s).count();
-    let title = format!(" Run Mode ({}/{}) ", active_count, total);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(tc.accent_secondary))
-        .title(title)
-        .title_style(
-            Style::default()
-                .fg(tc.accent_secondary)
-                .add_modifier(Modifier::BOLD),
-        );
-
-    let paragraph = Paragraph::new(lines).block(block);
-    frame.render_widget(paragraph, popup_area);
+    let labels: Vec<&str> = app.run_modes.iter().map(|s| s.as_str()).collect();
+    draw_checkbox_popup(
+        frame,
+        &labels,
+        &app.selected_run_modes,
+        app.run_mode_cursor,
+        "Run Mode",
+        tc,
+        None,
+    );
 }
 
 fn draw_params_bucket_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
-    let max_name_len = app
-        .params_buckets
-        .iter()
-        .map(|b| b.len())
-        .max()
-        .unwrap_or(10);
-    let (popup_area, inner_height) =
-        draw_popup_frame(frame, max_name_len as u16 + 10, app.params_buckets.len());
-    let total = app.params_buckets.len();
-
-    let scroll_offset = if app.params_bucket_cursor >= inner_height {
-        app.params_bucket_cursor - inner_height + 1
-    } else {
-        0
-    };
-
-    let lines: Vec<Line> = app
-        .params_buckets
-        .iter()
-        .enumerate()
-        .skip(scroll_offset)
-        .take(inner_height)
-        .map(|(i, name)| {
-            let checkbox = if app.selected_params_buckets[i] {
-                "[x]"
-            } else {
-                "[ ]"
-            };
-            let is_cursor = i == app.params_bucket_cursor;
-
-            let style = if is_cursor {
-                if app.selected_params_buckets[i] {
-                    Style::default()
-                        .fg(tc.good)
-                        .add_modifier(Modifier::BOLD)
-                        .bg(tc.highlight_bg)
-                } else {
-                    Style::default()
-                        .fg(tc.fg)
-                        .add_modifier(Modifier::BOLD)
-                        .bg(tc.highlight_bg)
-                }
-            } else if app.selected_params_buckets[i] {
-                Style::default().fg(tc.good)
-            } else {
-                Style::default().fg(tc.muted)
-            };
-
-            Line::from(Span::styled(format!(" {} {}", checkbox, name), style))
-        })
-        .collect();
-
-    let active_count = app.selected_params_buckets.iter().filter(|&&s| s).count();
-    let title = format!(" Params ({}/{}) ", active_count, total);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(tc.accent_secondary))
-        .title(title)
-        .title_style(
-            Style::default()
-                .fg(tc.accent_secondary)
-                .add_modifier(Modifier::BOLD),
-        );
-
-    let paragraph = Paragraph::new(lines).block(block);
-    frame.render_widget(paragraph, popup_area);
+    let labels: Vec<&str> = app.params_buckets.iter().map(|s| s.as_str()).collect();
+    draw_checkbox_popup(
+        frame,
+        &labels,
+        &app.selected_params_buckets,
+        app.params_bucket_cursor,
+        "Params",
+        tc,
+        None,
+    );
 }
 
 fn draw_license_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
-    let max_name_len = app.licenses.iter().map(|l| l.len()).max().unwrap_or(10);
-    let (popup_area, inner_height) =
-        draw_popup_frame(frame, max_name_len as u16 + 10, app.licenses.len());
-    let total = app.licenses.len();
-
-    let scroll_offset = if app.license_cursor >= inner_height {
-        app.license_cursor - inner_height + 1
-    } else {
-        0
-    };
-
-    let lines: Vec<Line> = app
-        .licenses
-        .iter()
-        .enumerate()
-        .skip(scroll_offset)
-        .take(inner_height)
-        .map(|(i, name)| {
-            let checkbox = if app.selected_licenses[i] {
-                "[x]"
-            } else {
-                "[ ]"
-            };
-            let is_cursor = i == app.license_cursor;
-
-            let style = if is_cursor {
-                if app.selected_licenses[i] {
-                    Style::default()
-                        .fg(tc.good)
-                        .add_modifier(Modifier::BOLD)
-                        .bg(tc.highlight_bg)
-                } else {
-                    Style::default()
-                        .fg(tc.fg)
-                        .add_modifier(Modifier::BOLD)
-                        .bg(tc.highlight_bg)
-                }
-            } else if app.selected_licenses[i] {
-                Style::default().fg(tc.good)
-            } else {
-                Style::default().fg(tc.muted)
-            };
-
-            Line::from(Span::styled(format!(" {} {}", checkbox, name), style))
-        })
-        .collect();
-
-    let active_count = app.selected_licenses.iter().filter(|&&s| s).count();
-    let title = format!(" License ({}/{}) ", active_count, total);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(tc.accent_secondary))
-        .title(title)
-        .title_style(
-            Style::default()
-                .fg(tc.accent_secondary)
-                .add_modifier(Modifier::BOLD),
-        );
-
-    let paragraph = Paragraph::new(lines).block(block);
-    frame.render_widget(paragraph, popup_area);
+    let labels: Vec<&str> = app.licenses.iter().map(|s| s.as_str()).collect();
+    draw_checkbox_popup(
+        frame,
+        &labels,
+        &app.selected_licenses,
+        app.license_cursor,
+        "License",
+        tc,
+        None,
+    );
 }
