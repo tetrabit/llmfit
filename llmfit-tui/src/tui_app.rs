@@ -1454,7 +1454,8 @@ impl App {
     }
 
     pub fn search_input(&mut self, c: char) {
-        self.search_query.insert(self.cursor_position, c);
+        let byte_idx = self.char_to_byte_index(self.cursor_position);
+        self.search_query.insert(byte_idx, c);
         self.cursor_position += 1;
         self.apply_filters();
     }
@@ -1462,14 +1463,17 @@ impl App {
     pub fn search_backspace(&mut self) {
         if self.cursor_position > 0 {
             self.cursor_position -= 1;
-            self.search_query.remove(self.cursor_position);
+            let byte_idx = self.char_to_byte_index(self.cursor_position);
+            self.search_query.remove(byte_idx);
             self.apply_filters();
         }
     }
 
     pub fn search_delete(&mut self) {
-        if self.cursor_position < self.search_query.len() {
-            self.search_query.remove(self.cursor_position);
+        let char_count = self.search_query.chars().count();
+        if self.cursor_position < char_count {
+            let byte_idx = self.char_to_byte_index(self.cursor_position);
+            self.search_query.remove(byte_idx);
             self.apply_filters();
         }
     }
@@ -2777,6 +2781,18 @@ impl App {
             PlanField::Quant => &mut self.plan_quant_input,
             PlanField::TargetTps => &mut self.plan_target_tps_input,
         }
+    }
+
+    /// Convert a character index into a byte index within `search_query`.
+    /// This is needed because `String::insert` and `String::remove` operate
+    /// on byte positions, but `cursor_position` tracks character position to
+    /// safely handle multi-byte characters (CJK, emoji, accented chars).
+    fn char_to_byte_index(&self, char_idx: usize) -> usize {
+        self.search_query
+            .char_indices()
+            .nth(char_idx)
+            .map(|(byte_idx, _)| byte_idx)
+            .unwrap_or(self.search_query.len())
     }
 }
 

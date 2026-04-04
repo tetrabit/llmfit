@@ -1,5 +1,5 @@
 use colored::*;
-use llmfit_core::fit::{FitLevel, ModelFit, SortColumn};
+use llmfit_core::fit::{FitLevel, InferenceRuntime, ModelFit, RunMode, SortColumn};
 use llmfit_core::hardware::SystemSpecs;
 use llmfit_core::models::{format_context_length, LlmModel};
 use llmfit_core::plan::PlanEstimate;
@@ -554,8 +554,10 @@ fn fit_to_json(fit: &ModelFit) -> serde_json::Value {
         "release_date": fit.model.release_date,
         "license": fit.model.license,
         "is_moe": fit.model.is_moe,
-        "fit_level": fit.fit_text(),
-        "run_mode": fit.run_mode_text(),
+        "fit_level": fit_level_code(fit.fit_level),
+        "fit_label": fit.fit_text(),
+        "run_mode": run_mode_code(fit.run_mode),
+        "run_mode_label": fit.run_mode_text(),
         "score": round1(fit.score),
         "score_components": {
             "quality": round1(fit.score_components.quality),
@@ -564,8 +566,8 @@ fn fit_to_json(fit: &ModelFit) -> serde_json::Value {
             "context": round1(fit.score_components.context),
         },
         "estimated_tps": round1(fit.estimated_tps),
-        "runtime": fit.runtime_text(),
-        "runtime_label": fit.runtime.label(),
+        "runtime": runtime_code(fit.runtime),
+        "runtime_label": fit.runtime_text(),
         "best_quant": fit.best_quant,
         "memory_required_gb": round2(fit.memory_required_gb),
         "memory_available_gb": round2(fit.memory_available_gb),
@@ -575,6 +577,33 @@ fn fit_to_json(fit: &ModelFit) -> serde_json::Value {
         "notes": fit.notes,
         "gguf_sources": fit.model.gguf_sources,
     })
+}
+
+fn fit_level_code(fit_level: FitLevel) -> &'static str {
+    match fit_level {
+        FitLevel::Perfect => "perfect",
+        FitLevel::Good => "good",
+        FitLevel::Marginal => "marginal",
+        FitLevel::TooTight => "too_tight",
+    }
+}
+
+fn run_mode_code(run_mode: RunMode) -> &'static str {
+    match run_mode {
+        RunMode::Gpu => "gpu",
+        RunMode::TensorParallel => "tensor_parallel",
+        RunMode::MoeOffload => "moe_offload",
+        RunMode::CpuOffload => "cpu_offload",
+        RunMode::CpuOnly => "cpu_only",
+    }
+}
+
+fn runtime_code(runtime: InferenceRuntime) -> &'static str {
+    match runtime {
+        InferenceRuntime::Mlx => "mlx",
+        InferenceRuntime::LlamaCpp => "llamacpp",
+        InferenceRuntime::Vllm => "vllm",
+    }
 }
 
 fn round1(v: f64) -> f64 {
