@@ -1,7 +1,7 @@
 # Makefile for llmfit
 # Convenience commands for building, testing, and updating the model database
 
-.PHONY: help build release clean run test update-models update-docker-models update-catalogs check fmt clippy install
+.PHONY: help build release clean run test update-models update-docker-models update-catalogs check fmt clippy install web-assets
 
 # Default target
 help:
@@ -22,12 +22,22 @@ help:
 	@echo "  make install        - Install release binary to ~/.cargo/bin"
 	@echo ""
 
+# Build web assets (graceful — warns if npm is missing)
+.PHONY: web-assets
+web-assets:
+	@if command -v npm >/dev/null 2>&1; then \
+		echo "Building web assets..."; \
+		cd llmfit-web && npm ci && npm run build; \
+	else \
+		echo "WARNING: npm not found — skipping web asset build. Install Node.js/npm for full builds."; \
+	fi
+
 # Build debug version
-build:
+build: web-assets
 	cargo build
 
 # Build release version
-release:
+release: web-assets
 	cargo build --release
 
 # Clean build artifacts

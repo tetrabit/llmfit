@@ -480,25 +480,14 @@ By default, the scraper enriches models with known GGUF download sources from pr
 ## Project structure
 
 ```
-src/
-  main.rs         -- CLI argument parsing, entrypoint, TUI launch
-  hardware.rs     -- System RAM/CPU/GPU detection (multi-GPU, backend identification)
-  models.rs       -- Model database, quantization hierarchy, dynamic quant selection
-  fit.rs          -- Multi-dimensional scoring (Q/S/F/C), speed estimation, MoE offloading
-  providers.rs    -- Runtime provider integration (Ollama, llama.cpp, MLX, Docker Model Runner, LM Studio), install detection, pull/download
-  display.rs      -- Classic CLI table rendering + JSON output
-  tui_app.rs      -- TUI application state, filters, navigation
-  tui_ui.rs       -- TUI rendering (ratatui)
-  tui_events.rs   -- TUI keyboard event handling (crossterm)
-data/
-  hf_models.json  -- Model database (206 models)
-skills/
-  llmfit-advisor/ -- OpenClaw skill for hardware-aware model recommendations
-scripts/
-  scrape_hf_models.py        -- HuggingFace API scraper
-  update_models.sh            -- Automated database update script
-  install-openclaw-skill.sh   -- Install the OpenClaw skill
-Makefile           -- Build and maintenance commands
+llmfit/
+├── llmfit-core/       # Shared fitting engine, hardware detection, providers
+├── llmfit-tui/        # CLI binary, TUI, REST API, web-asset embed
+├── llmfit-web/        # React/Vite dashboard served by llmfit-tui
+├── llmfit-desktop/    # Tauri desktop app
+├── scripts/           # Data regeneration + verification helpers
+├── data/              # Mirrored/generated data
+└── .github/workflows/ # CI and release workflows
 ```
 
 ---
