@@ -743,11 +743,9 @@ fn draw_table(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
                 .map(|r| r.contains(&row_idx))
                 .unwrap_or(false);
             let row_style = if is_pulling {
-                // Semantic color: highlight pulling rows visibly
-                Style::default().bg(Color::DarkGray).fg(Color::Yellow)
+                Style::default().bg(tc.highlight_bg).fg(tc.warning)
             } else if in_visual_range {
-                // Semantic color: highlight visual selection range
-                Style::default().bg(Color::DarkGray)
+                Style::default().bg(tc.highlight_bg)
             } else {
                 Style::default()
             };
@@ -882,7 +880,11 @@ fn draw_compare(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
 
     let sections = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Length(1), Constraint::Min(10)])
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Length(1),
+            Constraint::Min(10),
+        ])
         .split(area);
     let cols = Layout::default()
         .direction(Direction::Horizontal)
@@ -1447,8 +1449,7 @@ fn draw_multi_compare(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors
             let bg = if row_idx % 2 == 0 {
                 Style::default()
             } else {
-                // Semantic color: subtle alternating row background
-                Style::default().bg(Color::DarkGray)
+                Style::default().bg(tc.highlight_bg)
             };
             Row::new(cells).style(bg)
         })
@@ -1628,8 +1629,8 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
                     || app.docker_mr_available
                     || app.lmstudio_available
                     || app.vllm_available;
-                let model_downloadable = any_available
-                    && llmfit_core::providers::may_have_download_path(&fit.model);
+                let model_downloadable =
+                    any_available && llmfit_core::providers::may_have_download_path(&fit.model);
 
                 if !installed_providers.is_empty() {
                     let label = installed_providers
