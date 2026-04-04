@@ -756,6 +756,7 @@ impl App {
             .collect()
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn build_fits(
         models: &[LlmModel],
         specs: &SystemSpecs,
@@ -2279,7 +2280,6 @@ impl App {
                     0
                 },
                 specific_models,
-                ..Default::default()
             };
             let result = update::update_model_cache(&opts, |msg| {
                 let _ = tx.send(CatalogRefreshEvent::Progress(msg.to_string()));
@@ -3129,6 +3129,7 @@ mod tests {
             )
         }
 
+        #[allow(dead_code)]
         fn install_with_get_script(
             name: &str,
             server_start_success: bool,

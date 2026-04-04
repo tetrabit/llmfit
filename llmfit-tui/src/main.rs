@@ -903,6 +903,7 @@ fn find_fit_index_by_selector(fits: &[ModelFit], selector: &str) -> Result<usize
     find_name_index_by_selector(fits, selector, |fit| fit.model.name.as_str())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_diff(
     model_a: Option<String>,
     model_b: Option<String>,
@@ -1053,6 +1054,7 @@ fn draw_boot_screen(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_recommend(
     limit: usize,
     use_case: Option<String>,
@@ -1712,11 +1714,11 @@ fn load_llmfit_env_file() {
 fn main() {
     load_llmfit_env_file();
     let cli = Cli::parse();
-    if cli.refresh_models && !matches!(cli.command.as_ref(), Some(Commands::Update { .. })) {
-        if let Err(err) = refresh_models_now(|msg| eprintln!("{}", msg)) {
-            eprintln!("Model refresh failed: {}", err);
-            std::process::exit(1);
-        }
+    if cli.refresh_models && !matches!(cli.command.as_ref(), Some(Commands::Update { .. }))
+        && let Err(err) = refresh_models_now(|msg| eprintln!("{}", msg))
+    {
+        eprintln!("Model refresh failed: {}", err);
+        std::process::exit(1);
     }
     let context_limit = resolve_context_limit(cli.max_context);
     let auto_dashboard = !cli.no_dashboard

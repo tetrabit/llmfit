@@ -1334,7 +1334,7 @@ impl SystemSpecs {
         #[cfg(target_os = "linux")]
         {
             let text = std::fs::read_to_string("/proc/cpuinfo").ok()?;
-            return Self::parse_cpu_name_from_cpuinfo(&text);
+            Self::parse_cpu_name_from_cpuinfo(&text)
         }
 
         #[cfg(not(target_os = "linux"))]
@@ -1378,7 +1378,7 @@ impl SystemSpecs {
                 return None;
             }
 
-            return Some(model.to_string());
+            Some(model.to_string())
         }
 
         #[cfg(not(target_os = "linux"))]
@@ -1550,7 +1550,7 @@ fn detect_running_in_wsl() -> bool {
 ///  - Ryzen AI MAX / MAX+ (Strix Halo): up to 128 GB unified.
 ///  - Ryzen AI 9 / 7 / 5 (Strix Point, Krackan Point): configurable shared
 ///    memory, users can allocate most of system RAM to GPU via BIOS.
-/// All Ryzen AI APUs have integrated Radeon GPUs that share system memory.
+///    All Ryzen AI APUs have integrated Radeon GPUs that share system memory.
 fn is_amd_unified_memory_apu(cpu_name: &str) -> bool {
     let lower = cpu_name.to_lowercase();
     // All "Ryzen AI" branded APUs use unified/shared memory.

@@ -165,9 +165,7 @@ impl ModelFit {
         // the correct quantization hierarchy.
         // Honour the force_runtime override first if provided; otherwise
         // pre-quantized models default to vLLM, falling back to auto-detect.
-        let runtime = if system.cluster_mode {
-            InferenceRuntime::Vllm
-        } else if model.is_prequantized() {
+        let runtime = if system.cluster_mode || model.is_prequantized() {
             InferenceRuntime::Vllm
         } else if let Some(forced) = force_runtime {
             forced

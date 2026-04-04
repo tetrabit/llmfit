@@ -172,8 +172,9 @@ pub enum ModelFormat {
     Safetensors,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MetadataSource {
+    #[default]
     EmbeddedHf,
     RefreshedHf,
     LmStudioCatalog,
@@ -196,11 +197,6 @@ pub struct ModelMetadataOverlay {
     pub notes: Option<String>,
 }
 
-impl Default for MetadataSource {
-    fn default() -> Self {
-        Self::EmbeddedHf
-    }
-}
 
 impl ModelFormat {
     /// Returns true for formats that are pre-quantized at a fixed bit width
@@ -367,13 +363,9 @@ fn normalized_context_length(name: &str, context_length: u32) -> u32 {
         None
     };
 
-    let family_floor = if lower.contains("llama-4") || lower.contains("llama4") {
+    let family_floor = if lower.contains("llama-4") || lower.contains("llama4") || lower.contains("nemotron-3-nano-30b-a3b") {
         Some(1_048_576)
-    } else if lower.contains("nemotron-3-nano-30b-a3b") {
-        Some(1_048_576)
-    } else if lower.contains("llama-3") || lower.contains("llama3") {
-        Some(131_072)
-    } else if lower.contains("qwen3") || lower.contains("qwen2.5") {
+    } else if lower.contains("llama-3") || lower.contains("llama3") || lower.contains("qwen3") || lower.contains("qwen2.5") {
         Some(131_072)
     } else {
         None
@@ -664,8 +656,10 @@ struct HfModelEntry {
     #[serde(default)]
     format: ModelFormat,
     #[serde(default)]
+    #[allow(dead_code)]
     hf_downloads: u64,
     #[serde(default)]
+    #[allow(dead_code)]
     hf_likes: u64,
     #[serde(default)]
     license: Option<String>,
@@ -842,8 +836,6 @@ fn infer_heads_from_name(name: &str, params_b: f64) -> (u32, u32) {
             return (128, 16);
         } else if params_b > 50.0 {
             return (64, 8);
-        } else if params_b > 25.0 {
-            return (40, 8);
         } else if params_b > 10.0 {
             return (40, 8);
         } else if params_b > 5.0 {
@@ -855,9 +847,7 @@ fn infer_heads_from_name(name: &str, params_b: f64) -> (u32, u32) {
 
     // Llama family
     if name_lower.contains("llama") {
-        if name_lower.contains("scout") || name_lower.contains("maverick") {
-            return (64, 8);
-        } else if params_b > 60.0 {
+        if name_lower.contains("scout") || name_lower.contains("maverick") || params_b > 60.0 {
             return (64, 8);
         } else if params_b > 20.0 {
             return (48, 8);
@@ -874,8 +864,6 @@ fn infer_heads_from_name(name: &str, params_b: f64) -> (u32, u32) {
             return (128, 16);
         } else if params_b > 50.0 {
             return (64, 8);
-        } else if params_b > 25.0 {
-            return (40, 8);
         } else if params_b > 10.0 {
             return (40, 8);
         } else {
@@ -887,8 +875,6 @@ fn infer_heads_from_name(name: &str, params_b: f64) -> (u32, u32) {
     if name_lower.contains("mistral") || name_lower.contains("mixtral") {
         if params_b > 100.0 {
             return (96, 8);
-        } else if params_b > 20.0 {
-            return (32, 8);
         } else {
             return (32, 8);
         }
@@ -924,8 +910,6 @@ fn infer_heads_from_name(name: &str, params_b: f64) -> (u32, u32) {
         (128, 16)
     } else if params_b > 50.0 {
         (64, 8)
-    } else if params_b > 20.0 {
-        (32, 8)
     } else if params_b > 5.0 {
         (32, 8)
     } else {

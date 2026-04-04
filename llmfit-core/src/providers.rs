@@ -1600,10 +1600,8 @@ impl LmStudioProvider {
         };
 
         let mut output = run_ls(&cli)?;
-        if !output.status.success() && self.is_local_host() {
-            if self.ensure_local_server_running().is_ok() {
-                output = run_ls(&cli)?;
-            }
+        if !output.status.success() && self.is_local_host() && self.ensure_local_server_running().is_ok() {
+            output = run_ls(&cli)?;
         }
 
         if !output.status.success() {
@@ -2019,14 +2017,13 @@ fn parse_lmstudio_download_status(
 
     // Fallback: array shape (older API or multi-job listing)
     if let Ok(statuses) = serde_json::from_str::<Vec<LmStudioDownloadStatus>>(body) {
-        if let Some(job_id) = target_job_id {
-            if let Some(status) = statuses
+        if let Some(job_id) = target_job_id
+            && let Some(status) = statuses
                 .iter()
                 .find(|s| s.job_id.as_deref() == Some(job_id))
                 .cloned()
-            {
-                return Some(status);
-            }
+        {
+            return Some(status);
         }
         return statuses
             .into_iter()
@@ -2037,10 +2034,10 @@ fn parse_lmstudio_download_status(
 }
 fn lmstudio_progress_percent(status: &LmStudioDownloadStatus) -> Option<f64> {
     // Primary: bytes-based progress (official LM Studio v1 API)
-    if let (Some(downloaded), Some(total)) = (status.downloaded_bytes, status.total_size_bytes) {
-        if total > 0 {
-            return Some(downloaded as f64 / total as f64 * 100.0);
-        }
+    if let (Some(downloaded), Some(total)) = (status.downloaded_bytes, status.total_size_bytes)
+        && total > 0
+    {
+        return Some(downloaded as f64 / total as f64 * 100.0);
     }
     // Fallback: `progress` field (unofficial / older API versions)
     status
@@ -2108,13 +2105,12 @@ impl ModelProvider for LmStudioProvider {
             self.api_reachable(800)
         };
 
-        if !api_available && cli_direct_available {
-            if let Some(cli_tag) = candidates
+        if !api_available && cli_direct_available
+            && let Some(cli_tag) = candidates
                 .iter()
                 .find_map(|tag| Self::cli_fallback_tag(tag))
-            {
-                return self.start_pull_via_cli(&cli_tag);
-            }
+        {
+            return self.start_pull_via_cli(&cli_tag);
         }
 
         let provider = self.clone();

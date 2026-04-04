@@ -338,6 +338,21 @@ fn handle_params_bucket_popup_mode(app: &mut App, key: KeyEvent) {
     }
 }
 
+fn handle_license_popup_mode(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('L') | KeyCode::Char('q') => app.close_license_popup(),
+
+        KeyCode::Up | KeyCode::Char('k') => app.license_popup_up(),
+        KeyCode::Down | KeyCode::Char('j') => app.license_popup_down(),
+
+        KeyCode::Char(' ') | KeyCode::Enter => app.license_popup_toggle(),
+
+        KeyCode::Char('a') => app.license_popup_select_all(),
+
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::handle_normal_mode;
@@ -396,20 +411,5 @@ mod tests {
         assert!(!app.sort_ascending);
         assert!(app.search_query.is_empty());
         assert_eq!(app.pull_status.as_deref(), Some("Reset all filters"));
-    }
-}
-
-fn handle_license_popup_mode(app: &mut App, key: KeyEvent) {
-    match key.code {
-        KeyCode::Esc | KeyCode::Char('L') | KeyCode::Char('q') => app.close_license_popup(),
-
-        KeyCode::Up | KeyCode::Char('k') => app.license_popup_up(),
-        KeyCode::Down | KeyCode::Char('j') => app.license_popup_down(),
-
-        KeyCode::Char(' ') | KeyCode::Enter => app.license_popup_toggle(),
-
-        KeyCode::Char('a') => app.license_popup_select_all(),
-
-        _ => {}
     }
 }

@@ -878,7 +878,7 @@ fn extract_parameter_count_from_text(text: &str) -> Option<String> {
             continue;
         }
         let prefix = &token[..token.len().saturating_sub(1)];
-        if !(prefix.chars().all(|ch| ch.is_ascii_digit() || ch == '.') && !prefix.is_empty()) {
+        if !prefix.chars().all(|ch| ch.is_ascii_digit() || ch == '.') || prefix.is_empty() {
             continue;
         }
 
