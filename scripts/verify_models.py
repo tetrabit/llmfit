@@ -21,7 +21,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 HF_MODELS_PATH = REPO_ROOT / "data" / "hf_models.json"
-PROVIDERS_RS_PATH = REPO_ROOT / "src" / "providers.rs"
+PROVIDERS_RS_PATH = REPO_ROOT / "llmfit-core" / "src" / "providers.rs"
 
 HEADERS = {"User-Agent": "llmfit-verify/1.0"}
 REQUEST_DELAY = 0.3  # seconds between requests to avoid rate limiting
