@@ -606,6 +606,9 @@ def detect_quant_format(repo_id: str, config: dict | None) -> tuple[str, str]:
         elif "-GPTQ" in name_upper:
             label = f"GPTQ-Int{bits}"
             return ("gptq", label)
+        elif bits == 8 or "-FP8" in name_upper or "_FP8" in name_upper:
+            # FP8 compressed-tensors models are safetensors
+            return ("safetensors", "FP8")
 
     return _detect_format_from_name(repo_id)
 
@@ -624,8 +627,14 @@ def _detect_format_from_name(repo_id: str) -> tuple[str, str]:
         return ("gptq", "GPTQ-Int4")
     if "-MLX-" in name_upper or name_upper.endswith("-MLX"):
         return ("mlx", "Q4_K_M")  # MLX uses its own quant scheme handled elsewhere
+    if "-GGUF" in name_upper:
+        return ("gguf", "Q4_K_M")
+    if "-FP8" in name_upper or "_FP8" in name_upper:
+        return ("safetensors", "FP8")
 
-    return ("gguf", "Q4_K_M")
+    # Default to safetensors — matches Rust-side detect_format_from_hf() convention.
+    # Don't claim GGUF when we have no evidence of GGUF files.
+    return ("safetensors", "BF16")
 
 
 def scrape_model(repo_id: str) -> dict | None:
