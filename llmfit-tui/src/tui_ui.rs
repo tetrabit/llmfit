@@ -611,7 +611,7 @@ fn pull_indicator(percent: Option<f64>, tick: u64) -> String {
     }
 }
 
-fn draw_table(frame: &mut Frame, app: &mut App, area: Rect, tc: &ThemeColors) {
+fn draw_table(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
     let sort_col = app.sort_column;
     let header_names = [
         "", "Inst", "Model", "Provider", "Params", "Score", "tok/s*", "Quant", "Mode", "Mem %",
@@ -2898,19 +2898,9 @@ fn draw_params_bucket_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
 }
 
 fn draw_license_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
-    let area = frame.area();
-
     let max_name_len = app.licenses.iter().map(|l| l.len()).max().unwrap_or(10);
-    let popup_width = (max_name_len as u16 + 10).min(area.width.saturating_sub(4));
-    let popup_height = (app.licenses.len() as u16 + 2).min(area.height.saturating_sub(4));
-
-    let x = area.x + (area.width.saturating_sub(popup_width)) / 2;
-    let y = area.y + (area.height.saturating_sub(popup_height)) / 2;
-    let popup_area = Rect::new(x, y, popup_width, popup_height);
-
-    frame.render_widget(Clear, popup_area);
-
-    let inner_height = popup_height.saturating_sub(2) as usize;
+    let (popup_area, inner_height) =
+        draw_popup_frame(frame, max_name_len as u16 + 10, app.licenses.len());
     let total = app.licenses.len();
 
     let scroll_offset = if app.license_cursor >= inner_height {
