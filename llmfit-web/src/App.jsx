@@ -15,7 +15,8 @@ const RUNTIME_OPTIONS = [
   { value: 'any', label: 'Any runtime' },
   { value: 'mlx', label: 'MLX' },
   { value: 'llamacpp', label: 'llama.cpp' },
-  { value: 'vllm', label: 'vLLM' }
+  { value: 'vllm', label: 'vLLM' },
+  { value: 'lmstudio', label: 'LM Studio' }
 ];
 
 const USE_CASE_OPTIONS = [
@@ -550,8 +551,8 @@ export default function App() {
                   <div className="metrics-card">
                     <h4>Notes</h4>
                     <ul>
-                      {selectedModel.notes.map((note) => (
-                        <li key={note}>{note}</li>
+                      {selectedModel.notes.map((note, index) => (
+                        <li key={index}>{note}</li>
                       ))}
                     </ul>
                   </div>
