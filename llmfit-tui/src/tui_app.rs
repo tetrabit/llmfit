@@ -2609,16 +2609,20 @@ impl App {
             providers_for_model.push(DownloadProvider::Mlx);
         }
         // Check catalog gguf_sources first (no HTTP probe needed), then
-        // fall back to the heuristic repo lookup
-        if self.llamacpp_available
-            && (has_catalog_gguf || providers::first_existing_gguf_repo(model_name).is_some())
-        {
+        // fall back to the heuristic repo lookup.  Cache the result so we
+        // don't probe HuggingFace twice (llama.cpp + LM Studio both need it).
+        let gguf_available =
+            has_catalog_gguf || providers::first_existing_gguf_repo(model_name).is_some();
+        if self.llamacpp_available && gguf_available {
             providers_for_model.push(DownloadProvider::LlamaCpp);
         }
         if self.docker_mr_available && providers::has_docker_mr_mapping(model_name) {
             providers_for_model.push(DownloadProvider::DockerModelRunner);
         }
-        if self.lmstudio_available && providers::has_lmstudio_mapping(model_name) {
+        // LM Studio also downloads GGUF files, so require the same GGUF
+        // availability check as llama.cpp to avoid offering LM Studio as the
+        // only download option when no GGUF source exists.
+        if self.lmstudio_available && gguf_available {
             providers_for_model.push(DownloadProvider::LmStudio);
         }
         providers_for_model
