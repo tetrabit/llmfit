@@ -186,7 +186,25 @@ impl ModelFit {
             // Total VRAM is the sum across all nodes (NCCL handles distribution).
             let pool = system.total_gpu_vram_gb.unwrap_or(0.0);
             let tp_size = system.cluster_node_count;
-            if let Some((_, best_mem)) = choose_quant(pool) {
+
+            // Validate cluster configuration before proceeding.
+            if tp_size < 2 || pool <= 0.0 {
+                let mut reasons = Vec::new();
+                if tp_size < 2 {
+                    reasons.push(format!(
+                        "cluster_node_count={} (need ≥2)",
+                        tp_size
+                    ));
+                }
+                if pool <= 0.0 {
+                    reasons.push("total_gpu_vram_gb is zero or missing".to_string());
+                }
+                notes.push(format!(
+                    "Cluster: invalid configuration — {}",
+                    reasons.join(", ")
+                ));
+                (RunMode::TensorParallel, default_mem_required, pool)
+            } else if let Some((_, best_mem)) = choose_quant(pool) {
                 if tp_size > 1 {
                     notes.push(format!(
                         "Cluster: tensor-parallel across {} nodes via vLLM (TP={})",
@@ -879,7 +897,7 @@ fn estimate_tps(
         RunMode::TensorParallel => base *= 0.9, // TP communication overhead
         RunMode::MoeOffload => base *= 0.8,     // expert switching latency
         RunMode::CpuOffload => base *= 0.5,     // significant penalty
-        RunMode::CpuOnly => {}                   // recalculated below
+        RunMode::CpuOnly => {}                  // recalculated below
     }
 
     // CPU-only should use CPU K regardless of detected GPU
@@ -2079,7 +2097,8 @@ mod tests {
 
     #[test]
     fn test_cluster_node_count_zero_no_tp_note() {
-        // Cluster mode with node_count=0 should not produce a TP=0 note.
+        // Cluster mode with node_count=0 should produce an invalid config note
+        // and should NOT produce a TP=0 note.
         let model = test_model("7B", 4.0, Some(4.0));
         let mut system = test_system(64.0, true, Some(48.0));
         system.cluster_mode = true;
@@ -2095,6 +2114,50 @@ mod tests {
                 "Cluster with node_count=0 should not produce TP=0 note, got: {note}"
             );
         }
+        // Should contain invalid configuration note
+        assert!(
+            fit.notes.iter().any(|n| n.contains("invalid configuration")),
+            "Cluster with node_count=0 should report invalid config, got: {:?}",
+            fit.notes
+        );
+    }
+
+    #[test]
+    fn test_cluster_node_count_one_invalid() {
+        // Cluster mode with node_count=1 is invalid (need >= 2 nodes).
+        let model = test_model("7B", 4.0, Some(4.0));
+        let mut system = test_system(64.0, true, Some(48.0));
+        system.cluster_mode = true;
+        system.cluster_node_count = 1;
+        system.total_gpu_vram_gb = Some(48.0);
+
+        let fit = ModelFit::analyze(&model, &system);
+
+        assert!(
+            fit.notes.iter().any(|n| n.contains("invalid configuration")),
+            "Cluster with 1 node should report invalid config, got: {:?}",
+            fit.notes
+        );
+    }
+
+    #[test]
+    fn test_cluster_zero_vram_invalid() {
+        // Cluster mode with no VRAM should produce an error note.
+        let model = test_model("7B", 4.0, Some(4.0));
+        let mut system = test_system(64.0, true, Some(48.0));
+        system.cluster_mode = true;
+        system.cluster_node_count = 4;
+        system.total_gpu_vram_gb = None;
+
+        let fit = ModelFit::analyze(&model, &system);
+
+        assert!(
+            fit.notes
+                .iter()
+                .any(|n| n.contains("invalid configuration")),
+            "Cluster with no VRAM should report invalid config, got: {:?}",
+            fit.notes
+        );
     }
 
     #[test]
