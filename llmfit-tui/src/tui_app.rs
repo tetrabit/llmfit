@@ -4734,4 +4734,65 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn test_non_ascii_search_input_and_backspace() {
+        // Regression test for char-boundary-safe search handling (td-37236e).
+        // CJK and emoji characters are multi-byte; insert/backspace must
+        // use char_to_byte_index() to avoid panicking on byte boundaries.
+        let mut app = test_app_with_model("test-model", vec![]);
+
+        // Type CJK characters: "日本語"
+        app.search_input('日');
+        assert_eq!(app.search_query, "日");
+        assert_eq!(app.cursor_position, 1);
+
+        app.search_input('本');
+        assert_eq!(app.search_query, "日本");
+        assert_eq!(app.cursor_position, 2);
+
+        app.search_input('語');
+        assert_eq!(app.search_query, "日本語");
+        assert_eq!(app.cursor_position, 3);
+
+        // Backspace should remove last character (not corrupt the string)
+        app.search_backspace();
+        assert_eq!(app.search_query, "日本");
+        assert_eq!(app.cursor_position, 2);
+
+        app.search_backspace();
+        assert_eq!(app.search_query, "日");
+        assert_eq!(app.cursor_position, 1);
+
+        app.search_backspace();
+        assert_eq!(app.search_query, "");
+        assert_eq!(app.cursor_position, 0);
+
+        // Extra backspace at empty should not panic
+        app.search_backspace();
+        assert_eq!(app.search_query, "");
+        assert_eq!(app.cursor_position, 0);
+    }
+
+    #[test]
+    fn test_emoji_search_and_delete() {
+        // Emoji are multi-byte (4 bytes each); exercise delete too.
+        let mut app = test_app_with_model("test-model", vec![]);
+
+        app.search_input('🦀');
+        app.search_input('🔥');
+        assert_eq!(app.search_query, "🦀🔥");
+        assert_eq!(app.cursor_position, 2);
+
+        // Move cursor back and delete forward
+        app.cursor_position = 0;
+        app.search_delete();
+        assert_eq!(app.search_query, "🔥");
+        assert_eq!(app.cursor_position, 0);
+
+        // Delete at end should be no-op
+        app.cursor_position = 1;
+        app.search_delete();
+        assert_eq!(app.search_query, "🔥");
+    }
 }
