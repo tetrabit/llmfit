@@ -743,9 +743,11 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect, tc: &ThemeColors) {
                 .map(|r| r.contains(&row_idx))
                 .unwrap_or(false);
             let row_style = if is_pulling {
-                Style::default().bg(Color::Rgb(50, 50, 0))
+                // Semantic color: highlight pulling rows visibly
+                Style::default().bg(Color::DarkGray).fg(Color::Yellow)
             } else if in_visual_range {
-                Style::default().bg(Color::Rgb(40, 40, 80))
+                // Semantic color: highlight visual selection range
+                Style::default().bg(Color::DarkGray)
             } else {
                 Style::default()
             };
@@ -880,12 +882,12 @@ fn draw_compare(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
 
     let sections = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(10)])
+        .constraints([Constraint::Length(3), Constraint::Length(1), Constraint::Min(10)])
         .split(area);
     let cols = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(sections[1]);
+        .split(sections[2]);
 
     let title = Paragraph::new(Line::from(vec![
         Span::styled(" Compare ", Style::default().fg(tc.accent).bold()),
@@ -971,7 +973,7 @@ fn draw_compare(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
         "  Delta hints: ↑ value increased, ↓ value decreased (for Mem%, lower is better)",
         Style::default().fg(tc.muted),
     )));
-    frame.render_widget(legend, sections[0]);
+    frame.render_widget(legend, sections[1]);
 
     let left_metrics = CompareMetrics {
         score: format!("{:.1}", left.score),
@@ -1445,7 +1447,8 @@ fn draw_multi_compare(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors
             let bg = if row_idx % 2 == 0 {
                 Style::default()
             } else {
-                Style::default().bg(Color::Rgb(25, 25, 35))
+                // Semantic color: subtle alternating row background
+                Style::default().bg(Color::DarkGray)
             };
             Row::new(cells).style(bg)
         })
