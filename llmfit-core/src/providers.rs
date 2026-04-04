@@ -140,26 +140,7 @@ impl OllamaProvider {
     /// The HashSet may have fewer entries than 2*count due to family-name deduplication,
     /// so `len() / 2` is unreliable for counting models.
     pub fn installed_models_counted(&self) -> (HashSet<String>, usize) {
-        let mut set = HashSet::new();
-        let Ok(resp) = ureq::get(&self.api_url("tags"))
-            .config()
-            .timeout_global(Some(std::time::Duration::from_secs(5)))
-            .build()
-            .call()
-        else {
-            return (set, 0);
-        };
-        let Ok(tags): Result<TagsResponse, _> = resp.into_body().read_json() else {
-            return (set, 0);
-        };
-        let count = tags.models.len();
-        for m in tags.models {
-            let lower = m.name.to_lowercase();
-            set.insert(lower.clone());
-            if let Some(family) = lower.split(':').next() {
-                set.insert(family.to_string());
-            }
-        }
+        let (_, set, count) = self.detect_with_installed();
         (set, count)
     }
 
@@ -207,12 +188,8 @@ impl ModelProvider for OllamaProvider {
     }
 
     fn is_available(&self) -> bool {
-        ureq::get(&self.api_url("tags"))
-            .config()
-            .timeout_global(Some(std::time::Duration::from_secs(2)))
-            .build()
-            .call()
-            .is_ok()
+        let (available, _, _) = self.detect_with_installed();
+        available
     }
 
     fn installed_models(&self) -> HashSet<String> {

@@ -20,7 +20,7 @@ use llmfit_core::models::format_context_length;
 use llmfit_core::providers;
 use unicode_width::UnicodeWidthStr;
 
-pub fn draw(frame: &mut Frame, app: &mut App) {
+pub fn draw(frame: &mut Frame, app: &App) {
     let tc = app.theme.colors();
 
     // Fill background if theme specifies one
@@ -2177,20 +2177,26 @@ fn draw_plan(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
     frame.render_widget(paragraph, area);
 }
 
-fn draw_provider_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
+/// Helper: compute a centered popup area, clear it, and return `(popup_area, inner_height)`.
+///
+/// `content_width` is the desired width *before* clamping to the terminal.
+/// `item_count` is the number of list items; the popup height = item_count + 2 (border).
+fn draw_popup_frame(frame: &mut Frame, content_width: u16, item_count: usize) -> (Rect, usize) {
     let area = frame.area();
-
-    let max_name_len = app.providers.iter().map(|p| p.len()).max().unwrap_or(10);
-    let popup_width = (max_name_len as u16 + 10).min(area.width.saturating_sub(4));
-    let popup_height = (app.providers.len() as u16 + 2).min(area.height.saturating_sub(4));
-
+    let popup_width = content_width.min(area.width.saturating_sub(4));
+    let popup_height = (item_count as u16 + 2).min(area.height.saturating_sub(4));
     let x = area.x + (area.width.saturating_sub(popup_width)) / 2;
     let y = area.y + (area.height.saturating_sub(popup_height)) / 2;
     let popup_area = Rect::new(x, y, popup_width, popup_height);
-
     frame.render_widget(Clear, popup_area);
-
     let inner_height = popup_height.saturating_sub(2) as usize;
+    (popup_area, inner_height)
+}
+
+fn draw_provider_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
+    let max_name_len = app.providers.iter().map(|p| p.len()).max().unwrap_or(10);
+    let (popup_area, inner_height) =
+        draw_popup_frame(frame, max_name_len as u16 + 10, app.providers.len());
     let total = app.providers.len();
 
     let scroll_offset = if app.provider_cursor >= inner_height {
@@ -2272,24 +2278,14 @@ fn draw_provider_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
 }
 
 fn draw_use_case_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
-    let area = frame.area();
-
     let max_name_len = app
         .use_cases
         .iter()
         .map(|uc| uc.label().len())
         .max()
         .unwrap_or(10);
-    let popup_width = (max_name_len as u16 + 10).min(area.width.saturating_sub(4));
-    let popup_height = (app.use_cases.len() as u16 + 2).min(area.height.saturating_sub(4));
-
-    let x = area.x + (area.width.saturating_sub(popup_width)) / 2;
-    let y = area.y + (area.height.saturating_sub(popup_height)) / 2;
-    let popup_area = Rect::new(x, y, popup_width, popup_height);
-
-    frame.render_widget(Clear, popup_area);
-
-    let inner_height = popup_height.saturating_sub(2) as usize;
+    let (popup_area, inner_height) =
+        draw_popup_frame(frame, max_name_len as u16 + 10, app.use_cases.len());
     let total = app.use_cases.len();
 
     let scroll_offset = if app.use_case_cursor >= inner_height {
@@ -2706,19 +2702,9 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
 }
 
 fn draw_quant_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
-    let area = frame.area();
-
     let max_name_len = app.quants.iter().map(|q| q.len()).max().unwrap_or(10);
-    let popup_width = (max_name_len as u16 + 10).min(area.width.saturating_sub(4));
-    let popup_height = (app.quants.len() as u16 + 2).min(area.height.saturating_sub(4));
-
-    let x = area.x + (area.width.saturating_sub(popup_width)) / 2;
-    let y = area.y + (area.height.saturating_sub(popup_height)) / 2;
-    let popup_area = Rect::new(x, y, popup_width, popup_height);
-
-    frame.render_widget(Clear, popup_area);
-
-    let inner_height = popup_height.saturating_sub(2) as usize;
+    let (popup_area, inner_height) =
+        draw_popup_frame(frame, max_name_len as u16 + 10, app.quants.len());
     let total = app.quants.len();
 
     let scroll_offset = if app.quant_cursor >= inner_height {
@@ -2777,19 +2763,9 @@ fn draw_quant_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
 }
 
 fn draw_run_mode_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
-    let area = frame.area();
-
     let max_name_len = app.run_modes.iter().map(|m| m.len()).max().unwrap_or(10);
-    let popup_width = (max_name_len as u16 + 10).min(area.width.saturating_sub(4));
-    let popup_height = (app.run_modes.len() as u16 + 2).min(area.height.saturating_sub(4));
-
-    let x = area.x + (area.width.saturating_sub(popup_width)) / 2;
-    let y = area.y + (area.height.saturating_sub(popup_height)) / 2;
-    let popup_area = Rect::new(x, y, popup_width, popup_height);
-
-    frame.render_widget(Clear, popup_area);
-
-    let inner_height = popup_height.saturating_sub(2) as usize;
+    let (popup_area, inner_height) =
+        draw_popup_frame(frame, max_name_len as u16 + 10, app.run_modes.len());
     let total = app.run_modes.len();
 
     let scroll_offset = if app.run_mode_cursor >= inner_height {
@@ -2852,24 +2828,14 @@ fn draw_run_mode_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
 }
 
 fn draw_params_bucket_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
-    let area = frame.area();
-
     let max_name_len = app
         .params_buckets
         .iter()
         .map(|b| b.len())
         .max()
         .unwrap_or(10);
-    let popup_width = (max_name_len as u16 + 10).min(area.width.saturating_sub(4));
-    let popup_height = (app.params_buckets.len() as u16 + 2).min(area.height.saturating_sub(4));
-
-    let x = area.x + (area.width.saturating_sub(popup_width)) / 2;
-    let y = area.y + (area.height.saturating_sub(popup_height)) / 2;
-    let popup_area = Rect::new(x, y, popup_width, popup_height);
-
-    frame.render_widget(Clear, popup_area);
-
-    let inner_height = popup_height.saturating_sub(2) as usize;
+    let (popup_area, inner_height) =
+        draw_popup_frame(frame, max_name_len as u16 + 10, app.params_buckets.len());
     let total = app.params_buckets.len();
 
     let scroll_offset = if app.params_bucket_cursor >= inner_height {

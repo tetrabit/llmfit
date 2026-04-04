@@ -997,7 +997,7 @@ fn run_tui(memory_override: &Option<String>, context_limit: Option<u32>) -> std:
     // Main loop
     loop {
         terminal.draw(|frame| {
-            tui_ui::draw(frame, &mut app);
+            tui_ui::draw(frame, &app);
         })?;
 
         tui_events::handle_events(&mut app)?;

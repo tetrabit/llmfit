@@ -282,7 +282,14 @@ pub fn format_context_length(context_length: u32) -> String {
                 format!("{millions:.1}M")
             }
         }
-        _ if context_length >= 1_000 => format!("{}k", context_length / 1_000),
+        _ if context_length >= 1_000 => {
+            let k = context_length as f64 / 1_000.0;
+            if (k - k.round()).abs() < f64::EPSILON {
+                format!("{:.0}k", k)
+            } else {
+                format!("{:.1}k", k)
+            }
+        }
         _ => context_length.to_string(),
     }
 }
@@ -298,8 +305,11 @@ pub fn parse_context_query_threshold(raw: &str) -> Option<u32> {
         .unwrap_or(&normalized);
 
     match normalized {
+        "8k" | "8192" => Some(8_192),
+        "16k" | "16384" => Some(16_384),
         "32k" | "32768" => Some(32_768),
         "40k" | "40960" => Some(40_960),
+        "64k" | "65k" | "65536" => Some(65_536),
         "128k" | "131k" | "131072" => Some(131_072),
         "256k" | "262k" | "262144" => Some(262_144),
         "512k" | "524288" => Some(524_288),
@@ -512,6 +522,10 @@ impl LlmModel {
     }
 
     /// Parameter count in billions, extracted from parameters_raw or parameter_count.
+    ///
+    /// **Warning:** Falls back to `7.0` (billion) when the parameter count string
+    /// cannot be parsed or is empty. Callers that need to distinguish "unknown" from
+    /// a real value should check `parameters_raw` / `parameter_count` directly.
     pub fn params_b(&self) -> f64 {
         if let Some(raw) = self.parameters_raw {
             raw as f64 / 1_000_000_000.0

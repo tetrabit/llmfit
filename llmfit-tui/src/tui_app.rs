@@ -201,7 +201,7 @@ impl ContextFilter {
             ContextFilter::All => "All",
             ContextFilter::AtLeast32k => ">=32k",
             ContextFilter::AtLeast40k => ">=40k",
-            ContextFilter::AtLeast128k => ">=128k",
+            ContextFilter::AtLeast128k => ">=128k (131072)",
             ContextFilter::AtLeast131k => ">=131k",
             ContextFilter::AtLeast262k => ">=262k",
             ContextFilter::AtLeast512k => ">=512k",
@@ -238,7 +238,7 @@ impl ContextFilter {
         match label {
             ">=32k" => ContextFilter::AtLeast32k,
             ">=40k" => ContextFilter::AtLeast40k,
-            ">=128k" => ContextFilter::AtLeast128k,
+            ">=128k" | ">=128k (131072)" => ContextFilter::AtLeast128k,
             ">=131k" => ContextFilter::AtLeast131k,
             ">=262k" => ContextFilter::AtLeast262k,
             ">=512k" => ContextFilter::AtLeast512k,

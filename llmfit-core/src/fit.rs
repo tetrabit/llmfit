@@ -879,7 +879,7 @@ fn estimate_tps(
         RunMode::TensorParallel => base *= 0.9, // TP communication overhead
         RunMode::MoeOffload => base *= 0.8,     // expert switching latency
         RunMode::CpuOffload => base *= 0.5,     // significant penalty
-        RunMode::CpuOnly => base *= 0.3,        // worst case—override K to CPU
+        RunMode::CpuOnly => {}                   // recalculated below
     }
 
     // CPU-only should use CPU K regardless of detected GPU
