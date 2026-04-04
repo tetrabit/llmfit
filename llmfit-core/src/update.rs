@@ -1103,6 +1103,52 @@ fn fetch_lmstudio_catalog_models(progress: impl Fn(&str)) -> Result<Vec<LlmModel
 
 /// Convert a raw HF API entry into an `LlmModel`.
 /// Returns `None` for models that cannot be characterised as text-generation.
+/// Detect the model format from HF API tags and model name.
+///
+/// The HF API includes library tags like `"gguf"`, `"safetensors"`,
+/// `"transformers"` as well as quantization hints in the model name
+/// (e.g. `-AWQ`, `-GPTQ`, `-MLX`).  We check tags first (authoritative),
+/// then fall back to name-based heuristics.
+fn detect_format_from_hf(model_id: &str, tags: &[String]) -> (ModelFormat, String) {
+    let has_tag = |t: &str| tags.iter().any(|tag| tag.eq_ignore_ascii_case(t));
+    let name_upper = model_id.to_uppercase();
+
+    // AWQ — tag or name
+    if has_tag("awq") || name_upper.contains("-AWQ") {
+        let bits = if name_upper.contains("8BIT") { "8bit" } else { "4bit" };
+        return (ModelFormat::Awq, format!("AWQ-{bits}"));
+    }
+
+    // GPTQ — tag or name
+    if has_tag("gptq") || name_upper.contains("-GPTQ") {
+        let bits = if name_upper.contains("INT8") || name_upper.contains("8BIT") {
+            "Int8"
+        } else {
+            "Int4"
+        };
+        return (ModelFormat::Gptq, format!("GPTQ-{bits}"));
+    }
+
+    // MLX — tag or name
+    if has_tag("mlx") || name_upper.contains("-MLX") {
+        return (ModelFormat::Mlx, "MLX".to_string());
+    }
+
+    // Explicit GGUF tag or -GGUF in name → GGUF
+    if has_tag("gguf") || name_upper.contains("-GGUF") {
+        return (ModelFormat::Gguf, "Q4_K_M".to_string());
+    }
+
+    // safetensors tag (without any quant tag) → Safetensors
+    if has_tag("safetensors") || has_tag("transformers") {
+        return (ModelFormat::Safetensors, "BF16".to_string());
+    }
+
+    // No information → default to Safetensors (conservative: don't claim GGUF
+    // when we have no evidence of GGUF files).
+    (ModelFormat::Safetensors, "BF16".to_string())
+}
+
 fn map_to_llm_model(hf: HfApiModel, precise_context_length: Option<u32>) -> Option<LlmModel> {
     let is_tg = hf.pipeline_tag.as_deref() == Some("text-generation")
         || hf.tags.iter().any(|t| t == "text-generation");
@@ -1146,6 +1192,7 @@ fn map_to_llm_model(hf: HfApiModel, precise_context_length: Option<u32>) -> Opti
     let context_length =
         precise_context_length.unwrap_or_else(|| infer_context_length(&hf.id, params_raw));
     let (min_ram, rec_ram, min_vram) = estimate_ram(raw, is_moe, active_params);
+    let (format, quantization) = detect_format_from_hf(&hf.id, &hf.tags);
 
     let provider = hf
         .author
@@ -1173,10 +1220,7 @@ fn map_to_llm_model(hf: HfApiModel, precise_context_length: Option<u32>) -> Opti
         min_ram_gb: min_ram,
         recommended_ram_gb: rec_ram,
         min_vram_gb: min_vram,
-        // Q4_K_M is used as a conservative approximation for all fetched models.
-        // Actual available quantizations depend on the GGUF files published for
-        // each model.  RAM/VRAM estimates downstream reflect this assumption.
-        quantization: "Q4_K_M".to_string(),
+        quantization,
         context_length,
         use_case,
         is_moe,
@@ -1186,7 +1230,7 @@ fn map_to_llm_model(hf: HfApiModel, precise_context_length: Option<u32>) -> Opti
         release_date,
         gguf_sources: vec![],
         capabilities: vec![],
-        format: ModelFormat::default(),
+        format,
         num_attention_heads: None,
         num_key_value_heads: None,
         metadata_overlay: None,

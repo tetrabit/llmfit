@@ -3014,19 +3014,89 @@ pub fn hf_name_to_gguf_candidates(hf_name: &str) -> Vec<String> {
         return vec![repo.to_string()];
     }
 
-    // Heuristic: try common GGUF repo naming patterns
-    let base = hf_name.split('/').next_back().unwrap_or(hf_name);
+    // Heuristic: try common GGUF repo naming patterns.
+    //
+    // Given `Owner/ModelName`, community quantizers typically publish as:
+    //   - `quantizer/ModelName-GGUF`          (most common)
+    //   - `bartowski/Owner_ModelName-GGUF`    (bartowski includes owner via underscore)
+    //   - `Owner/ModelName-GGUF`              (self-published by model author)
+    let (owner, base) = hf_name
+        .split_once('/')
+        .unwrap_or(("", hf_name));
 
-    vec![
-        format!("bartowski/{}-GGUF", base),
-        format!("ggml-org/{}-GGUF", base),
-        format!("TheBloke/{}-GGUF", base),
-    ]
+    let mut candidates = Vec::with_capacity(10);
+
+    // bartowski — two patterns: Owner_Model-GGUF and Model-GGUF
+    if !owner.is_empty() {
+        candidates.push(format!("bartowski/{}_{}-GGUF", owner, base));
+    }
+    candidates.push(format!("bartowski/{}-GGUF", base));
+
+    // unsloth
+    candidates.push(format!("unsloth/{}-GGUF", base));
+
+    // lmstudio-community
+    candidates.push(format!("lmstudio-community/{}-GGUF", base));
+
+    // mradermacher — also try i1 (imatrix) variant
+    candidates.push(format!("mradermacher/{}-GGUF", base));
+    candidates.push(format!("mradermacher/{}-i1-GGUF", base));
+
+    // ggml-org (official llama.cpp conversions)
+    candidates.push(format!("ggml-org/{}-GGUF", base));
+
+    // QuantFactory
+    candidates.push(format!("QuantFactory/{}-GGUF", base));
+
+    // TheBloke (legacy, mostly older models)
+    candidates.push(format!("TheBloke/{}-GGUF", base));
+
+    // Self-published: Owner/ModelName-GGUF
+    if !owner.is_empty() {
+        candidates.push(format!("{}/{}-GGUF", owner, base));
+    }
+
+    candidates
 }
 
 /// Returns `true` if this HF model has a known GGUF mapping.
 pub fn has_gguf_mapping(hf_name: &str) -> bool {
     lookup_gguf_repo(hf_name).is_some()
+}
+
+/// Quick check whether a model has any known local download path.
+///
+/// This is a fast, offline check (no HTTP calls) used by the TUI to decide
+/// whether to show "press d to pull".  It returns `true` if:
+///   - the model has an Ollama mapping, OR
+///   - the model has a hardcoded GGUF mapping, OR
+///   - the model has non-empty `gguf_sources`, OR
+///   - the model has a Docker Model Runner mapping, OR
+///   - the model format is GGUF (heuristic probe may find a repo at download
+///     time — we give the benefit of the doubt for GGUF-tagged models).
+///
+/// For Safetensors/AWQ/GPTQ models without any of the above, returns `false`.
+pub fn may_have_download_path(model: &crate::models::LlmModel) -> bool {
+    use crate::models::ModelFormat;
+
+    if has_ollama_mapping(&model.name) {
+        return true;
+    }
+    if has_gguf_mapping(&model.name) {
+        return true;
+    }
+    if !model.gguf_sources.is_empty() {
+        return true;
+    }
+    if has_docker_mr_mapping(&model.name) {
+        return true;
+    }
+    // GGUF-tagged models get the benefit of the doubt: the heuristic probe
+    // at download time may find a community GGUF repo.
+    if model.format == ModelFormat::Gguf {
+        return true;
+    }
+    false
 }
 
 /// Check if a model is installed in the llama.cpp cache.
@@ -4126,7 +4196,35 @@ mod tests {
             candidates
                 .iter()
                 .any(|c| c == "bartowski/Cool-Model-7B-GGUF"),
-            "Should generate bartowski candidate, got: {:?}",
+            "Should generate bartowski base candidate, got: {:?}",
+            candidates
+        );
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c == "bartowski/SomeOrg_Cool-Model-7B-GGUF"),
+            "Should generate bartowski owner_base candidate, got: {:?}",
+            candidates
+        );
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c == "unsloth/Cool-Model-7B-GGUF"),
+            "Should generate unsloth candidate, got: {:?}",
+            candidates
+        );
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c == "lmstudio-community/Cool-Model-7B-GGUF"),
+            "Should generate lmstudio-community candidate, got: {:?}",
+            candidates
+        );
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c == "mradermacher/Cool-Model-7B-GGUF"),
+            "Should generate mradermacher candidate, got: {:?}",
             candidates
         );
         assert!(
@@ -4143,19 +4241,36 @@ mod tests {
             "Should generate TheBloke candidate, got: {:?}",
             candidates
         );
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c == "SomeOrg/Cool-Model-7B-GGUF"),
+            "Should generate self-published candidate, got: {:?}",
+            candidates
+        );
     }
 
     #[test]
     fn test_hf_name_to_gguf_candidates_strips_owner() {
-        // Should use the model name part, not the full "owner/name"
+        // Most candidates should use the model name part, not "owner/name"
         let candidates = hf_name_to_gguf_candidates("Qwen/Qwen2.5-7B-Instruct");
-        for c in &candidates {
-            assert!(
-                !c.contains("Qwen/Qwen"),
-                "Candidate should not contain original owner prefix: {}",
-                c
-            );
-        }
+        // The bartowski owner_base format (Qwen_Qwen2.5-...) and self-published
+        // (Qwen/Qwen2.5-...-GGUF) are the only ones that should reference the
+        // original owner; all others should just use the model base name.
+        let owner_refs: Vec<_> = candidates
+            .iter()
+            .filter(|c| {
+                // Bartowski owner_base and self-published are expected to have owner
+                !c.starts_with("bartowski/Qwen_")
+                    && !c.starts_with("Qwen/")
+                    && c.contains("Qwen/Qwen")
+            })
+            .collect();
+        assert!(
+            owner_refs.is_empty(),
+            "Only bartowski owner_base and self-published should reference owner, but found: {:?}",
+            owner_refs
+        );
     }
 
     #[test]
@@ -4184,8 +4299,14 @@ mod tests {
         // the major GGUF providers
         let candidates = hf_name_to_gguf_candidates("SomeOrg/NewModel-7B");
         assert!(candidates.iter().any(|c| c.starts_with("bartowski/")));
+        assert!(candidates.iter().any(|c| c.starts_with("unsloth/")));
+        assert!(candidates.iter().any(|c| c.starts_with("lmstudio-community/")));
+        assert!(candidates.iter().any(|c| c.starts_with("mradermacher/")));
         assert!(candidates.iter().any(|c| c.starts_with("ggml-org/")));
+        assert!(candidates.iter().any(|c| c.starts_with("QuantFactory/")));
         assert!(candidates.iter().any(|c| c.starts_with("TheBloke/")));
+        assert!(candidates.iter().any(|c| c.starts_with("SomeOrg/")));
+        // All candidates should end with -GGUF (except i1 variants which end -i1-GGUF)
         assert!(candidates.iter().all(|c| c.ends_with("-GGUF")));
     }
 

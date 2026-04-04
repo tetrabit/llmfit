@@ -2399,7 +2399,18 @@ impl App {
                         .to_string()
                     }
                 }
-                _ => "No downloadable format found for this model".to_string(),
+                ModelFormat::Safetensors => {
+                    "Safetensors model — no GGUF conversion found. Checked bartowski, unsloth, lmstudio-community, and others"
+                        .to_string()
+                }
+                ModelFormat::Gguf => {
+                    "No GGUF repository found for this model. Checked bartowski, unsloth, lmstudio-community, mradermacher, ggml-org, and others"
+                        .to_string()
+                }
+                ModelFormat::Mlx => {
+                    "MLX model — requires Apple Silicon with MLX installed"
+                        .to_string()
+                }
             }
         }
     }
@@ -2745,7 +2756,9 @@ impl App {
                 false
             };
             let has_docker = docker_mr_available && providers::has_docker_mr_mapping(&model_name);
-            let has_lmstudio = lmstudio_available && providers::has_lmstudio_mapping(&model_name);
+            // LM Studio also downloads GGUF files — use the same gguf check as
+            // llama.cpp to stay consistent with available_download_providers().
+            let has_lmstudio = lmstudio_available && has_llamacpp;
 
             let mut flags = 0u8;
             if has_ollama {

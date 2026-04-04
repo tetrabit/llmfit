@@ -1628,6 +1628,8 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
                     || app.docker_mr_available
                     || app.lmstudio_available
                     || app.vllm_available;
+                let model_downloadable = any_available
+                    && llmfit_core::providers::may_have_download_path(&fit.model);
 
                 if !installed_providers.is_empty() {
                     let label = installed_providers
@@ -1643,8 +1645,22 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
                         "✗ No  (vLLM runtime available; download weights separately)",
                         Style::default().fg(tc.muted),
                     )
-                } else if any_available {
+                } else if model_downloadable {
                     Span::styled("✗ No  (press d to pull)", Style::default().fg(tc.muted))
+                } else if any_available {
+                    let reason = match fit.model.format {
+                        llmfit_core::models::ModelFormat::Safetensors => {
+                            "✗ No  (safetensors only — no GGUF conversion available)"
+                        }
+                        llmfit_core::models::ModelFormat::Awq => {
+                            "✗ No  (AWQ format — not supported by local runtimes)"
+                        }
+                        llmfit_core::models::ModelFormat::Gptq => {
+                            "✗ No  (GPTQ format — not supported by local runtimes)"
+                        }
+                        _ => "✗ No  (no downloadable format found for this model)",
+                    };
+                    Span::styled(reason, Style::default().fg(tc.muted))
                 } else {
                     Span::styled("- No runtime detected", Style::default().fg(tc.muted))
                 }
