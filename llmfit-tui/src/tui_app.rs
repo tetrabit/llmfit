@@ -306,6 +306,7 @@ struct FilterState {
     selected_quants: Option<Vec<String>>,
     selected_run_modes: Option<Vec<String>>,
     selected_params_buckets: Option<Vec<String>>,
+    selected_licenses: Option<Vec<String>>,
 }
 
 impl Default for FilterState {
@@ -325,6 +326,7 @@ impl Default for FilterState {
             selected_quants: None,
             selected_run_modes: None,
             selected_params_buckets: None,
+            selected_licenses: None,
         }
     }
 }
@@ -398,6 +400,10 @@ impl FilterState {
             selected_params_buckets: Some(App::selected_string_items(
                 &app.params_buckets,
                 &app.selected_params_buckets,
+            )),
+            selected_licenses: Some(App::selected_string_items(
+                &app.licenses,
+                &app.selected_licenses,
             )),
         }
     }
@@ -701,6 +707,12 @@ impl App {
             state.selected_params_buckets.as_deref(),
         ) {
             self.selected_params_buckets = selected;
+        }
+        if let Some(selected) = Self::apply_saved_string_selection(
+            &self.licenses,
+            state.selected_licenses.as_deref(),
+        ) {
+            self.selected_licenses = selected;
         }
     }
 
@@ -1425,6 +1437,7 @@ impl App {
         Self::reset_named_selection(&mut self.selected_quants);
         Self::reset_named_selection(&mut self.selected_run_modes);
         Self::reset_named_selection(&mut self.selected_params_buckets);
+        Self::reset_named_selection(&mut self.selected_licenses);
         self.search_query.clear();
         self.cursor_position = 0;
         self.rebuild_fits();
@@ -2106,6 +2119,7 @@ impl App {
             self.selected_licenses[self.license_cursor] =
                 !self.selected_licenses[self.license_cursor];
             self.apply_filters();
+            self.save_filter_state();
         }
     }
 
@@ -2116,6 +2130,7 @@ impl App {
             *s = new_val;
         }
         self.apply_filters();
+        self.save_filter_state();
     }
 
     pub fn toggle_installed_first(&mut self) {
@@ -3766,6 +3781,7 @@ mod tests {
             selected_quants: Some(vec!["Q4_K_M".to_string()]),
             selected_run_modes: Some(vec!["GPU".to_string(), "CPU".to_string()]),
             selected_params_buckets: Some(vec!["7-14B".to_string()]),
+            selected_licenses: Some(vec!["MIT".to_string()]),
         };
         let path = temp_path("roundtrip-filter-state");
 
@@ -3927,6 +3943,7 @@ mod tests {
             selected_quants: Some(vec!["Q4_K_M".to_string()]),
             selected_run_modes: Some(vec!["CPU".to_string()]),
             selected_params_buckets: Some(vec!["7-14B".to_string()]),
+            selected_licenses: Some(vec!["Apache-2.0".to_string()]),
         };
 
         app.apply_filter_state(&state);
