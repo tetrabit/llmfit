@@ -6,3 +6,11 @@ llmfit-desktop/gen/schemas/*
 data/gguf_sources_cache.json
 llmfit-web/node_modules/
 llmfit-web/dist/
+.todos/
+.sidecar/
+.sidecar-agent
+.sidecar-task
+.sidecar-pr
+.sidecar-start.sh
+.sidecar-base
+.td-root

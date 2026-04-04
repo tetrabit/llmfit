@@ -89,3 +89,167 @@
 {"ts":"2026-04-04T03:32:14.502332312-04:00","cmd":"review","flags":{"reason":"Fixed in b4fd9af"},"session":"ses_8acba6","ok":true,"dur_ms":19}
 {"ts":"2026-04-04T03:32:14.721010006-04:00","cmd":"review","flags":{"reason":"Fixed in b4fd9af"},"session":"ses_8acba6","ok":true,"dur_ms":19}
 {"ts":"2026-04-04T03:32:14.941690826-04:00","cmd":"list","flags":{"epic":"td-3b664d","short":"true","status":"[in_progress]"},"session":"ses_8acba6","ok":true,"dur_ms":1}
+{"ts":"2026-04-04T03:38:40.032410185-04:00","cmd":"review","flags":{"reason":"Fixed in 778661c"},"session":"ses_8acba6","ok":true,"dur_ms":18}
+{"ts":"2026-04-04T03:38:40.253065946-04:00","cmd":"review","flags":{"reason":"Fixed in 778661c"},"session":"ses_8acba6","ok":true,"dur_ms":18}
+{"ts":"2026-04-04T03:38:40.473623698-04:00","cmd":"review","flags":{"reason":"Fixed in 65c5308"},"session":"ses_8acba6","ok":true,"dur_ms":18}
+{"ts":"2026-04-04T03:38:40.692701286-04:00","cmd":"review","flags":{"reason":"Fixed in 65c5308"},"session":"ses_8acba6","ok":true,"dur_ms":18}
+{"ts":"2026-04-04T03:38:40.912406294-04:00","cmd":"review","flags":{"reason":"Fixed in 65c5308"},"session":"ses_8acba6","ok":true,"dur_ms":18}
+{"ts":"2026-04-04T03:38:41.131948177-04:00","cmd":"review","flags":{"reason":"Fixed in 97f84ea"},"session":"ses_8acba6","ok":true,"dur_ms":18}
+{"ts":"2026-04-04T03:38:41.352375373-04:00","cmd":"review","flags":{"reason":"Fixed in 97f84ea"},"session":"ses_8acba6","ok":true,"dur_ms":19}
+{"ts":"2026-04-04T03:38:41.57217689-04:00","cmd":"review","flags":{"reason":"Fixed in 97f84ea"},"session":"ses_8acba6","ok":true,"dur_ms":19}
+{"ts":"2026-04-04T03:38:41.792497345-04:00","cmd":"review","flags":{"reason":"Fixed in 97f84ea"},"session":"ses_8acba6","ok":true,"dur_ms":19}
+{"ts":"2026-04-04T03:38:42.011535423-04:00","cmd":"review","flags":{"reason":"Fixed in 97f84ea"},"session":"ses_8acba6","ok":true,"dur_ms":18}
+{"ts":"2026-04-04T03:38:42.23930034-04:00","cmd":"review","flags":{"reason":"Fixed in 97f84ea"},"session":"ses_8acba6","ok":true,"dur_ms":23}
+{"ts":"2026-04-04T03:38:42.451170193-04:00","cmd":"review","flags":{"reason":"Fixed in 60cfcea"},"session":"ses_8acba6","ok":true,"dur_ms":19}
+{"ts":"2026-04-04T03:38:42.671699035-04:00","cmd":"review","flags":{"reason":"Fixed in 60cfcea"},"session":"ses_8acba6","ok":true,"dur_ms":14}
+{"ts":"2026-04-04T03:38:42.892907078-04:00","cmd":"review","flags":{"reason":"Fixed in 60cfcea"},"session":"ses_8acba6","ok":true,"dur_ms":13}
+{"ts":"2026-04-04T03:38:43.111141681-04:00","cmd":"review","flags":{"reason":"Fixed in b679dfd"},"session":"ses_8acba6","ok":true,"dur_ms":13}
+{"ts":"2026-04-04T03:38:43.330740987-04:00","cmd":"review","flags":{"reason":"Fixed in b679dfd"},"session":"ses_8acba6","ok":true,"dur_ms":14}
+{"ts":"2026-04-04T03:38:43.550607059-04:00","cmd":"review","flags":{"reason":"Fixed in b4fd9af"},"session":"ses_8acba6","ok":true,"dur_ms":14}
+{"ts":"2026-04-04T03:38:43.770717947-04:00","cmd":"review","flags":{"reason":"Fixed in b4fd9af"},"session":"ses_8acba6","ok":true,"dur_ms":14}
+{"ts":"2026-04-04T03:38:43.991102783-04:00","cmd":"info","session":"ses_8acba6","ok":true,"dur_ms":14}
+{"ts":"2026-04-04T03:39:02.848222421-04:00","cmd":"ws","sub":"end","session":"ses_8acba6","ok":true,"dur_ms":6}
+{"ts":"2026-04-04T06:08:49.418029019-04:00","cmd":"version","flags":{"short":"true"},"session":"ses_8acba6","ok":true,"dur_ms":0}
+{"ts":"2026-04-04T06:19:28.792699845-04:00","cmd":"create","flags":{"description":"## Problem\n\nMany models show \"press d to pull\" in the detail panel but pressing 'd' gives \"No downloadable format found for this model\" with no explanation of WHY. This affects the majority of models in the database.\n\n### Root Cause Chain\n\n1. **map_to_llm_model() in update.rs** (line 1189) sets `format: ModelFormat::default()` which is `Gguf` for ALL HF-fetched models, regardless of actual format. A safetensors-only model like `silx-ai/Quasar-10B` gets tagged as GGUF.\n\n2. **map_to_llm_model()** (line 1187) always sets `gguf_sources: vec![]` — empty. No GGUF download sources are ever populated for HF-fetched models.\n\n3. **The scraper** (`_detect_format_from_name()` in scrape_hf_models.py, line 628) has the same issue — defaults to `(\"gguf\", \"Q4_K_M\")` when format cannot be determined from the name.\n\n4. **available_download_providers()** in tui_app.rs checks `has_catalog_gguf` (empty) then falls back to `first_existing_gguf_repo()` which does HTTP probes for heuristic GGUF repos (bartowski, ggml-org, TheBloke). For niche models, none exist.\n\n5. **The TUI detail panel** (tui_ui.rs line 1647) shows \"press d to pull\" whenever ANY runtime is available, without checking if this specific model actually has a download path.\n\n6. **format_no_download_message()** for ModelFormat::Gguf (the catch-all default) just says \"No downloadable format found\" — no explanation of what was tried or why it failed.\n\n### Scale of Impact\n\n- 721 out of 796 cached models have `format: gguf` with empty `gguf_sources`\n- 974 out of 1107 embedded models lack `gguf_sources`\n- The heuristic GGUF repo probe only checks 3 patterns (bartowski, ggml-org, TheBloke) — misses unsloth, mradermacher, lmstudio-community, and the model's own repo\n- Models with no GGUF conversion anywhere on HuggingFace still show \"press d to pull\"\n\n### Example\n\n`silx-ai/Quasar-10B`: a safetensors-only model with zero GGUF files anywhere on HuggingFace, but shown as format=gguf with \"press d to pull\" in the TUI.\n\n### Fix (multi-part)\n\n**Part 1 — Detect format correctly in map_to_llm_model():**\nCheck the HF API response for actual file types (siblings or tags) to set format accurately. If model only has safetensors files, set `format: Safetensors`.\n\n**Part 2 — Populate gguf_sources during HF fetch:**\nWhen fetching from HF trending/downloads, also search for known GGUF repos (bartowski, unsloth, etc.) and populate gguf_sources at fetch time rather than at download time.\n\n**Part 3 — Fix \"press d to pull\" display logic:**\nThe detail panel should only show \"press d to pull\" if the model actually has a viable download path. Add a quick pre-check (has_ollama_mapping OR has_catalog_gguf OR mlx_available for MLX models).\n\n**Part 4 — Better error message:**\nWhen no download is available, explain WHY: \"This model has no GGUF conversion available. GGUF files are needed for llama.cpp/Ollama/LM Studio downloads.\"\n\n**Part 5 — Expand GGUF repo heuristics:**\nAdd unsloth, mradermacher, lmstudio-community to hf_name_to_gguf_candidates() patterns.\n\n### Acceptance Criteria\n\n- [ ] Models without actual GGUF availability do NOT show \"press d to pull\"\n- [ ] Pressing 'd' on models without GGUF gives a clear explanation of why\n- [ ] map_to_llm_model correctly detects safetensors vs gguf format\n- [ ] hf_name_to_gguf_candidates includes at least 6 common GGUF providers\n- [ ] gguf_sources populated at fetch time for HF models where possible\n- [ ] All existing tests pass: cargo test --verbose\n- [ ] Web dashboard npm tests pass: cd llmfit-web \u0026\u0026 npm test","epic":"td-3b664d","labels":"high,core,tui,download,ux","priority":"P1","type":"bug"},"session":"ses_8acba6","ok":true,"dur_ms":45}
+{"ts":"2026-04-04T06:19:46.206501859-04:00","cmd":"create","flags":{"description":"## Problem\n\nThe download capability probe (which shows O/L/D/S indicators in the table) uses DIFFERENT logic than the actual download path (when user presses 'd'), causing misleading indicators.\n\n### Inconsistency Details\n\n**Capability probe** (tui_app.rs line 2748):\n```rust\nlet has_lmstudio = lmstudio_available \u0026\u0026 providers::has_lmstudio_mapping(\u0026model_name);\n```\n`has_lmstudio_mapping()` returns `true` for ANY non-empty model name (providers.rs line 2696).\n\n**Actual download** (tui_app.rs line 2625):\n```rust\nif self.lmstudio_available \u0026\u0026 gguf_available { ... }\n```\nThis requires a real GGUF source to exist.\n\n### Effect\n\nThe table column may show \"S\" (LM Studio available) for a model, but pressing 'd' does not offer LM Studio as a download option because no GGUF source was found. The indicator lies to the user.\n\n### Fix\n\nAlign the capability probe LM Studio check with the actual download logic:\n```rust\nlet has_lmstudio = lmstudio_available\n    \u0026\u0026 (has_catalog_gguf || providers::first_existing_gguf_repo(\u0026model_name).is_some());\n```\n\nOr alternatively, use the same `gguf_available` variable that the llama.cpp check already computed.\n\n### Acceptance Criteria\n\n- [ ] Capability probe uses same logic as available_download_providers for all runtimes\n- [ ] Table indicators match what pressing 'd' actually offers\n- [ ] All existing tests pass: cargo test --verbose","epic":"td-3b664d","labels":"high,tui,download,ux","priority":"P1","type":"bug"},"session":"ses_8acba6","ok":true,"dur_ms":38}
+{"ts":"2026-04-04T06:19:51.036894519-04:00","cmd":"dep","sub":"add","session":"ses_8acba6","ok":true,"dur_ms":29}
+{"ts":"2026-04-04T11:53:09.980507079-04:00","cmd":"usage","flags":{"new-session":"true"},"session":"ses_34b076","ok":true,"dur_ms":15}
+{"ts":"2026-04-04T11:53:14.516931353-04:00","cmd":"session","session":"ses_34b076","ok":true,"dur_ms":17}
+{"ts":"2026-04-04T11:53:17.691835526-04:00","cmd":"status","session":"ses_34b076","ok":true,"dur_ms":19}
+{"ts":"2026-04-04T11:53:31.692231333-04:00","cmd":"show","session":"ses_34b076","ok":true,"dur_ms":20}
+{"ts":"2026-04-04T11:53:36.413665719-04:00","cmd":"comment","session":"ses_34b076","ok":true,"dur_ms":14}
+{"ts":"2026-04-04T11:53:36.44509912-04:00","cmd":"approve","session":"ses_34b076","ok":true,"dur_ms":21}
+{"ts":"2026-04-04T11:54:17.747178217-04:00","cmd":"show","session":"ses_34b076","ok":true,"dur_ms":18}
+{"ts":"2026-04-04T11:54:17.789467719-04:00","cmd":"show","session":"ses_34b076","ok":true,"dur_ms":16}
+{"ts":"2026-04-04T11:54:17.830663284-04:00","cmd":"show","session":"ses_34b076","ok":true,"dur_ms":16}
+{"ts":"2026-04-04T11:54:17.872300041-04:00","cmd":"show","session":"ses_34b076","ok":true,"dur_ms":15}
+{"ts":"2026-04-04T11:54:17.929504977-04:00","cmd":"show","session":"ses_34b076","ok":true,"dur_ms":15}
+{"ts":"2026-04-04T11:54:17.997584244-04:00","cmd":"show","session":"ses_34b076","ok":true,"dur_ms":19}
+{"ts":"2026-04-04T11:54:18.040332431-04:00","cmd":"show","session":"ses_34b076","ok":true,"dur_ms":16}
+{"ts":"2026-04-04T11:54:18.079423931-04:00","cmd":"show","session":"ses_34b076","ok":true,"dur_ms":15}
+{"ts":"2026-04-04T11:54:18.119960015-04:00","cmd":"show","session":"ses_34b076","ok":true,"dur_ms":15}
+{"ts":"2026-04-04T11:54:18.158100006-04:00","cmd":"show","session":"ses_34b076","ok":true,"dur_ms":15}
+{"ts":"2026-04-04T11:54:18.196530305-04:00","cmd":"show","session":"ses_34b076","ok":true,"dur_ms":16}
+{"ts":"2026-04-04T11:54:18.243000317-04:00","cmd":"show","session":"ses_34b076","ok":true,"dur_ms":16}
+{"ts":"2026-04-04T11:54:18.282528632-04:00","cmd":"show","session":"ses_34b076","ok":true,"dur_ms":15}
+{"ts":"2026-04-04T11:54:20.453977454-04:00","cmd":"start","session":"ses_34b076","ok":true,"dur_ms":24}
+{"ts":"2026-04-04T11:54:25.220289915-04:00","cmd":"show","session":"ses_34b076","ok":true,"dur_ms":17}
+{"ts":"2026-04-04T11:54:25.260761798-04:00","cmd":"show","session":"ses_34b076","ok":true,"dur_ms":15}
+{"ts":"2026-04-04T11:54:25.299392852-04:00","cmd":"show","session":"ses_34b076","ok":true,"dur_ms":15}
+{"ts":"2026-04-04T11:54:25.339321197-04:00","cmd":"show","session":"ses_34b076","ok":true,"dur_ms":16}
+{"ts":"2026-04-04T11:54:25.405292452-04:00","cmd":"show","session":"ses_34b076","ok":true,"dur_ms":15}
+{"ts":"2026-04-04T11:54:25.443430193-04:00","cmd":"show","session":"ses_34b076","ok":true,"dur_ms":17}
+{"ts":"2026-04-04T11:54:25.485581585-04:00","cmd":"show","session":"ses_34b076","ok":true,"dur_ms":16}
+{"ts":"2026-04-04T11:54:25.527026103-04:00","cmd":"show","session":"ses_34b076","ok":true,"dur_ms":15}
+{"ts":"2026-04-04T11:54:25.597384026-04:00","cmd":"show","session":"ses_34b076","ok":true,"dur_ms":16}
+{"ts":"2026-04-04T11:54:25.637759618-04:00","cmd":"show","session":"ses_34b076","ok":true,"dur_ms":16}
+{"ts":"2026-04-04T11:54:25.679447602-04:00","cmd":"show","session":"ses_34b076","ok":true,"dur_ms":15}
+{"ts":"2026-04-04T11:59:24.356308494-04:00","cmd":"create","flags":{"description":"All 5 App.test.jsx tests fail with TypeError: window.localStorage.getItem is not a function. The test-setup.js or test file afterEach does not properly mock/stub localStorage for jsdom. api.test.js (3 tests) passes fine. This was likely introduced by the theme persistence feature (td-f18828 related). Needs localStorage stub in test-setup.js or per-test beforeEach.","labels":"regression,web,tests","priority":"P1","type":"bug"},"session":"ses_34b076","ok":true,"dur_ms":28}
+{"ts":"2026-04-04T11:59:24.582045031-04:00","cmd":"create","flags":{"description":"td-37236e fixed the char boundary panic for non-ASCII search input but did not add a unit test. A test exercising CJK/emoji input with backspace should be added to prevent regression.","minor":"true","priority":"P3","type":"chore"},"session":"ses_34b076","ok":true,"dur_ms":27}
+{"ts":"2026-04-04T11:59:24.806186618-04:00","cmd":"create","flags":{"description":"td-22aa72 removed all Color::Rgb values but lines ~747, ~750, ~1451 in tui_ui.rs still use Color::DarkGray and Color::Yellow instead of tc.highlight_bg / tc.warning. These will look bad on some light themes.","minor":"true","priority":"P3","type":"chore"},"session":"ses_34b076","ok":true,"dur_ms":27}
+{"ts":"2026-04-04T11:59:25.035407778-04:00","cmd":"create","flags":{"description":"td-94065d fixed the TP=0 note by guarding if tp_size \u003e 1, but does NOT validate cluster_node_count \u003e= 2 or total_gpu_vram_gb \u003e 0 when cluster_mode=true. Invalid cluster config silently produces pool=0.0 and everything shows TooTight without explanation. Should return a clear error note.","priority":"P2","type":"bug"},"session":"ses_34b076","ok":true,"dur_ms":26}
+{"ts":"2026-04-04T11:59:38.097048898-04:00","cmd":"comment","session":"ses_34b076","ok":true,"dur_ms":20}
+{"ts":"2026-04-04T11:59:38.323603835-04:00","cmd":"reject","session":"ses_34b076","ok":true,"dur_ms":23}
+{"ts":"2026-04-04T11:59:38.549782706-04:00","cmd":"comment","session":"ses_34b076","ok":true,"dur_ms":20}
+{"ts":"2026-04-04T11:59:38.77988222-04:00","cmd":"reject","session":"ses_34b076","ok":true,"dur_ms":24}
+{"ts":"2026-04-04T12:00:08.674529442-04:00","cmd":"comment","session":"ses_34b076","ok":true,"dur_ms":22}
+{"ts":"2026-04-04T12:00:08.898781556-04:00","cmd":"approve","session":"ses_34b076","ok":true,"dur_ms":19}
+{"ts":"2026-04-04T12:00:09.110842482-04:00","cmd":"comment","session":"ses_34b076","ok":true,"dur_ms":15}
+{"ts":"2026-04-04T12:00:09.330117887-04:00","cmd":"approve","session":"ses_34b076","ok":true,"dur_ms":23}
+{"ts":"2026-04-04T12:00:09.549089194-04:00","cmd":"comment","session":"ses_34b076","ok":true,"dur_ms":15}
+{"ts":"2026-04-04T12:00:09.767793377-04:00","cmd":"approve","session":"ses_34b076","ok":true,"dur_ms":19}
+{"ts":"2026-04-04T12:00:09.987933444-04:00","cmd":"comment","session":"ses_34b076","ok":true,"dur_ms":14}
+{"ts":"2026-04-04T12:00:10.207560554-04:00","cmd":"approve","session":"ses_34b076","ok":true,"dur_ms":22}
+{"ts":"2026-04-04T12:00:10.428269255-04:00","cmd":"comment","session":"ses_34b076","ok":true,"dur_ms":15}
+{"ts":"2026-04-04T12:00:10.647677532-04:00","cmd":"approve","session":"ses_34b076","ok":true,"dur_ms":21}
+{"ts":"2026-04-04T12:00:10.87425173-04:00","cmd":"comment","session":"ses_34b076","ok":true,"dur_ms":16}
+{"ts":"2026-04-04T12:00:11.091031856-04:00","cmd":"approve","session":"ses_34b076","ok":true,"dur_ms":21}
+{"ts":"2026-04-04T12:00:11.315704302-04:00","cmd":"comment","session":"ses_34b076","ok":true,"dur_ms":20}
+{"ts":"2026-04-04T12:00:11.535287675-04:00","cmd":"approve","session":"ses_34b076","ok":true,"dur_ms":25}
+{"ts":"2026-04-04T12:00:11.755857137-04:00","cmd":"comment","session":"ses_34b076","ok":true,"dur_ms":15}
+{"ts":"2026-04-04T12:00:11.979798329-04:00","cmd":"approve","session":"ses_34b076","ok":true,"dur_ms":20}
+{"ts":"2026-04-04T12:00:12.201929419-04:00","cmd":"comment","session":"ses_34b076","ok":true,"dur_ms":21}
+{"ts":"2026-04-04T12:00:12.428059883-04:00","cmd":"approve","session":"ses_34b076","ok":true,"dur_ms":22}
+{"ts":"2026-04-04T12:00:12.648836102-04:00","cmd":"comment","session":"ses_34b076","ok":true,"dur_ms":16}
+{"ts":"2026-04-04T12:00:12.870080118-04:00","cmd":"approve","session":"ses_34b076","ok":true,"dur_ms":21}
+{"ts":"2026-04-04T12:00:13.092682141-04:00","cmd":"comment","session":"ses_34b076","ok":true,"dur_ms":16}
+{"ts":"2026-04-04T12:00:13.312001094-04:00","cmd":"approve","session":"ses_34b076","ok":true,"dur_ms":21}
+{"ts":"2026-04-04T12:00:13.533995717-04:00","cmd":"comment","session":"ses_34b076","ok":true,"dur_ms":17}
+{"ts":"2026-04-04T12:00:13.756869328-04:00","cmd":"approve","session":"ses_34b076","ok":true,"dur_ms":21}
+{"ts":"2026-04-04T12:00:13.978709409-04:00","cmd":"comment","session":"ses_34b076","ok":true,"dur_ms":20}
+{"ts":"2026-04-04T12:00:14.200495563-04:00","cmd":"approve","session":"ses_34b076","ok":true,"dur_ms":22}
+{"ts":"2026-04-04T12:00:14.422684985-04:00","cmd":"comment","session":"ses_34b076","ok":true,"dur_ms":15}
+{"ts":"2026-04-04T12:00:14.648163526-04:00","cmd":"approve","session":"ses_34b076","ok":true,"dur_ms":30}
+{"ts":"2026-04-04T12:00:39.894782165-04:00","cmd":"comment","session":"ses_34b076","ok":true,"dur_ms":17}
+{"ts":"2026-04-04T12:00:40.11945122-04:00","cmd":"approve","session":"ses_34b076","ok":true,"dur_ms":26}
+{"ts":"2026-04-04T12:00:40.348265737-04:00","cmd":"comment","session":"ses_34b076","ok":true,"dur_ms":18}
+{"ts":"2026-04-04T12:00:40.574659348-04:00","cmd":"approve","session":"ses_34b076","ok":true,"dur_ms":29}
+{"ts":"2026-04-04T12:00:40.802373666-04:00","cmd":"comment","session":"ses_34b076","ok":true,"dur_ms":21}
+{"ts":"2026-04-04T12:00:41.027745528-04:00","cmd":"approve","session":"ses_34b076","ok":true,"dur_ms":26}
+{"ts":"2026-04-04T12:00:41.256902455-04:00","cmd":"comment","session":"ses_34b076","ok":true,"dur_ms":22}
+{"ts":"2026-04-04T12:00:41.484604894-04:00","cmd":"approve","session":"ses_34b076","ok":true,"dur_ms":27}
+{"ts":"2026-04-04T12:00:41.712556932-04:00","cmd":"comment","session":"ses_34b076","ok":true,"dur_ms":23}
+{"ts":"2026-04-04T12:00:41.940581236-04:00","cmd":"approve","session":"ses_34b076","ok":true,"dur_ms":22}
+{"ts":"2026-04-04T12:00:42.162492193-04:00","cmd":"comment","session":"ses_34b076","ok":true,"dur_ms":21}
+{"ts":"2026-04-04T12:00:42.388140885-04:00","cmd":"approve","session":"ses_34b076","ok":true,"dur_ms":23}
+{"ts":"2026-04-04T12:00:42.619689236-04:00","cmd":"comment","session":"ses_34b076","ok":true,"dur_ms":20}
+{"ts":"2026-04-04T12:00:42.842111615-04:00","cmd":"approve","session":"ses_34b076","ok":true,"dur_ms":27}
+{"ts":"2026-04-04T12:00:43.075516736-04:00","cmd":"comment","session":"ses_34b076","ok":true,"dur_ms":22}
+{"ts":"2026-04-04T12:00:43.301346702-04:00","cmd":"approve","session":"ses_34b076","ok":true,"dur_ms":28}
+{"ts":"2026-04-04T12:00:43.53016919-04:00","cmd":"comment","session":"ses_34b076","ok":true,"dur_ms":23}
+{"ts":"2026-04-04T12:00:43.83604855-04:00","cmd":"approve","session":"ses_34b076","ok":true,"dur_ms":52}
+{"ts":"2026-04-04T12:00:44.029635502-04:00","cmd":"comment","session":"ses_34b076","ok":true,"dur_ms":25}
+{"ts":"2026-04-04T12:00:44.259900878-04:00","cmd":"approve","session":"ses_34b076","ok":true,"dur_ms":32}
+{"ts":"2026-04-04T12:00:44.495499963-04:00","cmd":"comment","session":"ses_34b076","ok":true,"dur_ms":29}
+{"ts":"2026-04-04T12:00:44.721312949-04:00","cmd":"approve","session":"ses_34b076","ok":true,"dur_ms":38}
+{"ts":"2026-04-04T12:00:44.947178178-04:00","cmd":"comment","session":"ses_34b076","ok":true,"dur_ms":22}
+{"ts":"2026-04-04T12:00:45.171170154-04:00","cmd":"approve","session":"ses_34b076","ok":true,"dur_ms":30}
+{"ts":"2026-04-04T12:00:54.767713164-04:00","cmd":"show","session":"ses_8acba6","ok":true,"dur_ms":29}
+{"ts":"2026-04-04T12:01:05.949661514-04:00","cmd":"status","session":"ses_8acba6","ok":true,"dur_ms":26}
+{"ts":"2026-04-04T12:01:10.1917909-04:00","cmd":"list","flags":{"status":"[open]","type":"[bug]"},"session":"ses_8acba6","ok":true,"dur_ms":2}
+{"ts":"2026-04-04T12:05:43.92795773-04:00","cmd":"version","flags":{"short":"true"},"session":"ses_8acba6","ok":true,"dur_ms":0}
+{"ts":"2026-04-04T12:08:59.65241628-04:00","cmd":"status","session":"ses_29e0d3","ok":true,"dur_ms":26}
+{"ts":"2026-04-04T12:09:03.632435325-04:00","cmd":"show","session":"ses_29e0d3","ok":true,"dur_ms":16}
+{"ts":"2026-04-04T12:09:08.840316127-04:00","cmd":"show","session":"ses_29e0d3","ok":true,"dur_ms":4}
+{"ts":"2026-04-04T12:09:45.909938591-04:00","cmd":"start","session":"ses_29e0d3","ok":true,"dur_ms":32}
+{"ts":"2026-04-04T12:09:50.421757603-04:00","cmd":"ws","sub":"start","session":"ses_29e0d3","ok":true,"dur_ms":28}
+{"ts":"2026-04-04T12:09:54.657470974-04:00","cmd":"ws","sub":"tag","session":"ses_29e0d3","ok":true,"dur_ms":21}
+{"ts":"2026-04-04T12:09:59.507619493-04:00","cmd":"link","flags":{"role":"implementation"},"session":"ses_29e0d3","ok":true,"dur_ms":20}
+{"ts":"2026-04-04T12:10:03.731171426-04:00","cmd":"link","flags":{"role":"implementation"},"session":"ses_29e0d3","ok":true,"dur_ms":23}
+{"ts":"2026-04-04T12:10:03.780549439-04:00","cmd":"link","flags":{"role":"implementation"},"session":"ses_29e0d3","ok":true,"dur_ms":24}
+{"ts":"2026-04-04T12:10:03.830440895-04:00","cmd":"link","flags":{"role":"implementation"},"session":"ses_29e0d3","ok":true,"dur_ms":23}
+{"ts":"2026-04-04T12:10:07.584013949-04:00","cmd":"link","flags":{"role":"implementation"},"session":"ses_29e0d3","ok":true,"dur_ms":24}
+{"ts":"2026-04-04T12:10:13.792404341-04:00","cmd":"log","flags":{"result":"true"},"session":"ses_29e0d3","ok":true,"dur_ms":24}
+{"ts":"2026-04-04T12:10:18.518061209-04:00","cmd":"log","flags":{"result":"true"},"session":"ses_29e0d3","ok":true,"dur_ms":24}
+{"ts":"2026-04-04T12:10:29.639416476-04:00","cmd":"handoff","flags":{"decision":"[Default to Safetensors when no format tags present (conservative — avoids false GGUF claims),Deferred Part 2 (gguf_sources at fetch) — expanded heuristics solve the core UX problem without slowing updates]","done":"[\"detect_format_from_hf() added to update.rs — inspects HF tags for gguf/safetensors/awq/gptq/mlx, defaults to Safetensors (conservative)\",\"hf_name_to_gguf_candidates() expanded: bartowski (2 patterns), unsloth, lmstudio-community, mradermacher (+i1), ggml-org, QuantFactory, TheBloke, self-published\",may_have_download_path() added to providers.rs — fast offline check for TUI display,TUI detail panel only shows 'press d' when may_have_download_path() returns true,\"format_no_download_message() gives specific reasons per format (safetensors, AWQ, GPTQ, GGUF, MLX)\",5 GGUF candidate tests updated to cover new providers]","remaining":"[gguf_sources not populated at HF fetch time (deferred — would add latency to online update)]","uncertain":"[npm test has 5 pre-existing failures (localStorage mock) — unrelated but should be fixed separately]"},"session":"ses_29e0d3","ok":true,"dur_ms":38}
+{"ts":"2026-04-04T12:10:35.350022278-04:00","cmd":"handoff","flags":{"decision":"[Reused has_llamacpp variable instead of recalculating — both check has_catalog_gguf || first_existing_gguf_repo()]","done":"[Replaced has_lmstudio_mapping() with has_llamacpp in capability probe — LM Studio now correctly requires GGUF source,Table indicators now match available_download_providers() behavior for all runtimes]"},"session":"ses_29e0d3","ok":true,"dur_ms":41}
+{"ts":"2026-04-04T12:10:39.09043924-04:00","cmd":"review","session":"ses_29e0d3","ok":true,"dur_ms":24}
+{"ts":"2026-04-04T12:10:39.138463582-04:00","cmd":"review","session":"ses_29e0d3","ok":true,"dur_ms":25}
+{"ts":"2026-04-04T12:10:43.288089452-04:00","cmd":"status","session":"ses_29e0d3","ok":true,"dur_ms":24}
+{"ts":"2026-04-04T12:10:54.833070903-04:00","cmd":"show","ok":false,"dur_ms":0,"err":"unknown flag: --handoff"}
+{"ts":"2026-04-04T12:10:58.764761207-04:00","cmd":"show","flags":{"long":"true"},"session":"ses_29e0d3","ok":true,"dur_ms":14}
+{"ts":"2026-04-04T12:11:07.419807411-04:00","cmd":"approve","session":"ses_29e0d3","ok":true,"dur_ms":30}
+{"ts":"2026-04-04T12:11:11.973824819-04:00","cmd":"reviewable","session":"ses_29e0d3","ok":true,"dur_ms":24}
+{"ts":"2026-04-04T12:11:15.767817927-04:00","cmd":"in-review","session":"ses_29e0d3","ok":true,"dur_ms":23}
+{"ts":"2026-04-04T12:11:20.178842202-04:00","cmd":"approve","session":"ses_29e0d3","ok":true,"dur_ms":28}
+{"ts":"2026-04-04T12:11:24.296922513-04:00","cmd":"status","session":"ses_29e0d3","ok":true,"dur_ms":22}
+{"ts":"2026-04-04T12:16:04.878359969-04:00","cmd":"usage","flags":{"quiet":"true"},"session":"ses_29e0d3","ok":true,"dur_ms":17}
+{"ts":"2026-04-04T12:16:08.759595099-04:00","cmd":"status","session":"ses_29e0d3","ok":true,"dur_ms":16}
+{"ts":"2026-04-04T12:16:12.685043689-04:00","cmd":"list","flags":{"long":"true","status":"[open]"},"session":"ses_29e0d3","ok":true,"dur_ms":3}
+{"ts":"2026-04-04T12:16:16.923886812-04:00","cmd":"show","session":"ses_29e0d3","ok":true,"dur_ms":21}
+{"ts":"2026-04-04T12:16:20.699515312-04:00","cmd":"show","session":"ses_29e0d3","ok":true,"dur_ms":21}
+{"ts":"2026-04-04T12:16:58.822703987-04:00","cmd":"show","flags":{"short":"true"},"session":"ses_29e0d3","ok":true,"dur_ms":2}
+{"ts":"2026-04-04T12:16:58.848508365-04:00","cmd":"show","flags":{"short":"true"},"session":"ses_29e0d3","ok":true,"dur_ms":1}
+{"ts":"2026-04-04T12:16:58.872806064-04:00","cmd":"show","flags":{"short":"true"},"session":"ses_29e0d3","ok":true,"dur_ms":17}
+{"ts":"2026-04-04T12:16:58.913289499-04:00","cmd":"show","flags":{"short":"true"},"session":"ses_29e0d3","ok":true,"dur_ms":17}
+{"ts":"2026-04-04T12:16:58.954320559-04:00","cmd":"show","flags":{"short":"true"},"session":"ses_29e0d3","ok":true,"dur_ms":1}
+{"ts":"2026-04-04T12:16:58.978005029-04:00","cmd":"show","flags":{"short":"true"},"session":"ses_29e0d3","ok":true,"dur_ms":0}
+{"ts":"2026-04-04T12:19:21.456766851-04:00","cmd":"ws","sub":"end","session":"ses_29e0d3","ok":true,"dur_ms":5}
+{"ts":"2026-04-04T12:19:21.485003908-04:00","cmd":"ws","sub":"start","session":"ses_29e0d3","ok":true,"dur_ms":21}
+{"ts":"2026-04-04T12:19:26.06147207-04:00","cmd":"ws","sub":"tag","session":"ses_29e0d3","ok":true,"dur_ms":77}
+{"ts":"2026-04-04T12:21:43.10270596-04:00","cmd":"close","ok":false,"dur_ms":0,"err":"unknown flag: --commit"}
+{"ts":"2026-04-04T12:21:46.862121834-04:00","cmd":"close","flags":{"comment":"Fixed in 8bf5edb"},"session":"ses_29e0d3","ok":true,"dur_ms":14}
+{"ts":"2026-04-04T12:21:51.038560763-04:00","cmd":"review","session":"ses_29e0d3","ok":true,"dur_ms":18}
+{"ts":"2026-04-04T12:22:44.561611551-04:00","cmd":"review","session":"ses_29e0d3","ok":true,"dur_ms":28}
+{"ts":"2026-04-04T12:23:48.986237523-04:00","cmd":"review","session":"ses_29e0d3","ok":true,"dur_ms":19}
+{"ts":"2026-04-04T12:24:38.580315202-04:00","cmd":"review","session":"ses_29e0d3","ok":true,"dur_ms":22}

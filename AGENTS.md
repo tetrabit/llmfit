@@ -1,5 +1,15 @@
 # PROJECT KNOWLEDGE BASE
 
+## MANDATORY: Use td for Task Management
+
+Run td usage --new-session at conversation start (or after /clear). This tells you what to work on next.
+
+Sessions are automatic (based on terminal/agent context). Optional:
+- td session "name" to label the current session
+- td session --new to force a new session in the same context
+
+Use td usage -q after first read.
+
 **Generated:** 2026-03-28 22:09 America/New_York
 **Commit:** `7b40343`
 **Branch:** `main`

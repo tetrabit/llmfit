@@ -3020,9 +3020,7 @@ pub fn hf_name_to_gguf_candidates(hf_name: &str) -> Vec<String> {
     //   - `quantizer/ModelName-GGUF`          (most common)
     //   - `bartowski/Owner_ModelName-GGUF`    (bartowski includes owner via underscore)
     //   - `Owner/ModelName-GGUF`              (self-published by model author)
-    let (owner, base) = hf_name
-        .split_once('/')
-        .unwrap_or(("", hf_name));
+    let (owner, base) = hf_name.split_once('/').unwrap_or(("", hf_name));
 
     let mut candidates = Vec::with_capacity(10);
 
@@ -4207,9 +4205,7 @@ mod tests {
             candidates
         );
         assert!(
-            candidates
-                .iter()
-                .any(|c| c == "unsloth/Cool-Model-7B-GGUF"),
+            candidates.iter().any(|c| c == "unsloth/Cool-Model-7B-GGUF"),
             "Should generate unsloth candidate, got: {:?}",
             candidates
         );
@@ -4242,9 +4238,7 @@ mod tests {
             candidates
         );
         assert!(
-            candidates
-                .iter()
-                .any(|c| c == "SomeOrg/Cool-Model-7B-GGUF"),
+            candidates.iter().any(|c| c == "SomeOrg/Cool-Model-7B-GGUF"),
             "Should generate self-published candidate, got: {:?}",
             candidates
         );
@@ -4300,7 +4294,11 @@ mod tests {
         let candidates = hf_name_to_gguf_candidates("SomeOrg/NewModel-7B");
         assert!(candidates.iter().any(|c| c.starts_with("bartowski/")));
         assert!(candidates.iter().any(|c| c.starts_with("unsloth/")));
-        assert!(candidates.iter().any(|c| c.starts_with("lmstudio-community/")));
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c.starts_with("lmstudio-community/"))
+        );
         assert!(candidates.iter().any(|c| c.starts_with("mradermacher/")));
         assert!(candidates.iter().any(|c| c.starts_with("ggml-org/")));
         assert!(candidates.iter().any(|c| c.starts_with("QuantFactory/")));

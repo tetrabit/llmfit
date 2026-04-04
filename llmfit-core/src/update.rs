@@ -145,8 +145,8 @@ pub fn save_lmstudio_metadata_cache(
         version: CACHE_VERSION,
         overlays: overlays.clone(),
     };
-    let json = serde_json::to_string_pretty(&envelope)
-        .map_err(|e| format!("Serialize error: {e}"))?;
+    let json =
+        serde_json::to_string_pretty(&envelope).map_err(|e| format!("Serialize error: {e}"))?;
     std::fs::write(&path, json).map_err(|e| format!("Failed to write cache: {e}"))?;
     Ok(())
 }
@@ -707,7 +707,9 @@ fn parse_lmstudio_model_page(html: &str) -> Option<LmStudioModelPageMetadata> {
 
 fn parse_lmstudio_model_page_from_yaml(html: &str) -> Option<LmStudioModelPageMetadata> {
     let title_start = html.find("# model.yaml is an open standard")?;
-    let title_end = html[title_start..].find("</pre>").map(|idx| title_start + idx)?;
+    let title_end = html[title_start..]
+        .find("</pre>")
+        .map(|idx| title_start + idx)?;
     let block = decode_html_text(&html[title_start..title_end]);
     let text = strip_html_tags(&block);
     let lines = text
@@ -915,7 +917,9 @@ fn fetch_lmstudio_model_page(model_key: &str) -> Result<Option<LmStudioModelPage
     Ok(parse_lmstudio_model_page(&html))
 }
 
-fn fetch_lmstudio_overlay_for_model(model_key: &str) -> Result<Option<ModelMetadataOverlay>, String> {
+fn fetch_lmstudio_overlay_for_model(
+    model_key: &str,
+) -> Result<Option<ModelMetadataOverlay>, String> {
     let Some(page) = fetch_lmstudio_model_page(model_key)? else {
         return Ok(None);
     };
@@ -940,7 +944,9 @@ fn fetch_lmstudio_overlay_for_model(model_key: &str) -> Result<Option<ModelMetad
     }))
 }
 
-fn resolve_lmstudio_overlay_for_model(repo_id: &str) -> Result<Option<ModelMetadataOverlay>, String> {
+fn resolve_lmstudio_overlay_for_model(
+    repo_id: &str,
+) -> Result<Option<ModelMetadataOverlay>, String> {
     let candidates = crate::providers::hf_name_to_lmstudio_candidates(repo_id);
     let mut last_error = None;
 
@@ -968,10 +974,14 @@ fn build_lmstudio_catalog_model(
     page: &LmStudioModelPageMetadata,
     memory_gb_hint: Option<f64>,
 ) -> Option<LlmModel> {
-    let parameter_count = page.parameter_count.clone().unwrap_or_else(|| "Unknown".to_string());
+    let parameter_count = page
+        .parameter_count
+        .clone()
+        .unwrap_or_else(|| "Unknown".to_string());
     let (parsed_label, params_raw, is_moe, num_experts, active_experts, active_parameters) =
         extract_model_params(model_key);
-    let params_raw = params_raw.or_else(|| page.parameter_count.as_deref().and_then(parse_param_str));
+    let params_raw =
+        params_raw.or_else(|| page.parameter_count.as_deref().and_then(parse_param_str));
     let parameter_count = if page.parameter_count.is_some() {
         parameter_count
     } else {
@@ -1002,7 +1012,10 @@ fn build_lmstudio_catalog_model(
         .next()
         .unwrap_or("LM Studio")
         .to_string();
-    let artifact_name = page.artifact_name.clone().unwrap_or_else(|| model_key.to_string());
+    let artifact_name = page
+        .artifact_name
+        .clone()
+        .unwrap_or_else(|| model_key.to_string());
 
     Some(LlmModel {
         name: model_key.to_string(),
@@ -1060,7 +1073,9 @@ fn fetch_lmstudio_catalog_models(progress: impl Fn(&str)) -> Result<Vec<LlmModel
         let family_html = match lmstudio_get(&lmstudio_model_url(family_slug)) {
             Ok(html) => html,
             Err(err) => {
-                progress(&format!("  Warning: LM Studio family fetch failed for {family_slug} — {err}"));
+                progress(&format!(
+                    "  Warning: LM Studio family fetch failed for {family_slug} — {err}"
+                ));
                 continue;
             }
         };
@@ -1073,11 +1088,9 @@ fn fetch_lmstudio_catalog_models(progress: impl Fn(&str)) -> Result<Vec<LlmModel
 
             match fetch_lmstudio_model_page(&entry.model_key) {
                 Ok(Some(page)) => {
-                    if let Some(model) = build_lmstudio_catalog_model(
-                        &entry.model_key,
-                        &page,
-                        entry.memory_gb,
-                    ) {
+                    if let Some(model) =
+                        build_lmstudio_catalog_model(&entry.model_key, &page, entry.memory_gb)
+                    {
                         models.push(model);
                     }
                 }
@@ -1115,7 +1128,11 @@ fn detect_format_from_hf(model_id: &str, tags: &[String]) -> (ModelFormat, Strin
 
     // AWQ — tag or name
     if has_tag("awq") || name_upper.contains("-AWQ") {
-        let bits = if name_upper.contains("8BIT") { "8bit" } else { "4bit" };
+        let bits = if name_upper.contains("8BIT") {
+            "8bit"
+        } else {
+            "4bit"
+        };
         return (ModelFormat::Awq, format!("AWQ-{bits}"));
     }
 
@@ -1358,7 +1375,9 @@ pub fn update_model_cache(
                     }
                 }
                 Ok(None) => {}
-                Err(e) => progress(&format!("  Warning: LM Studio metadata failed for {repo_id} — {e}")),
+                Err(e) => progress(&format!(
+                    "  Warning: LM Studio metadata failed for {repo_id} — {e}"
+                )),
             }
 
             if (idx + 1) % 25 == 0 || idx + 1 == known_model_ids.len() {
@@ -1641,11 +1660,13 @@ mod tests {
         assert_eq!(overlay.source, MetadataSource::LmStudioCatalog);
         assert_eq!(overlay.context_length, Some(1_048_576));
         assert_eq!(overlay.use_case.as_deref(), Some("Agentic & tool use"));
-        assert!(overlay
-            .capabilities
-            .as_ref()
-            .expect("caps present")
-            .contains(&Capability::ToolUse));
+        assert!(
+            overlay
+                .capabilities
+                .as_ref()
+                .expect("caps present")
+                .contains(&Capability::ToolUse)
+        );
     }
 
     #[test]
@@ -1767,7 +1788,11 @@ mod tests {
         assert_eq!(model.context_length, 262_144);
         assert!(model.min_ram_gb >= 15.0);
         assert_eq!(model.metadata_source(), MetadataSource::LmStudioCatalog);
-        assert!(model.effective_capabilities().contains(&Capability::ToolUse));
+        assert!(
+            model
+                .effective_capabilities()
+                .contains(&Capability::ToolUse)
+        );
         assert_eq!(
             model.gguf_sources[0].repo,
             "lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-GGUF"
@@ -1781,7 +1806,9 @@ mod tests {
             context_length: Some(1_048_576),
             capabilities: vec![Capability::ToolUse],
             parameter_count: Some("30B".to_string()),
-            artifact_name: Some("lmstudio-community/NVIDIA-Nemotron-3-Nano-30B-A3B-GGUF".to_string()),
+            artifact_name: Some(
+                "lmstudio-community/NVIDIA-Nemotron-3-Nano-30B-A3B-GGUF".to_string(),
+            ),
             notes: Some("LM Studio catalog metadata".to_string()),
         };
 
@@ -1823,7 +1850,11 @@ mod tests {
 
         assert_eq!(imported.provider, "openai");
         assert_eq!(imported.effective_context_length(), 131_072);
-        assert!(imported.effective_capabilities().contains(&Capability::ToolUse));
+        assert!(
+            imported
+                .effective_capabilities()
+                .contains(&Capability::ToolUse)
+        );
 
         if let Some(content) = original_cache {
             if let Some(dir) = cache_path.parent() {

@@ -191,10 +191,7 @@ impl ModelFit {
             if tp_size < 2 || pool <= 0.0 {
                 let mut reasons = Vec::new();
                 if tp_size < 2 {
-                    reasons.push(format!(
-                        "cluster_node_count={} (need ≥2)",
-                        tp_size
-                    ));
+                    reasons.push(format!("cluster_node_count={} (need ≥2)", tp_size));
                 }
                 if pool <= 0.0 {
                     reasons.push("total_gpu_vram_gb is zero or missing".to_string());
@@ -615,7 +612,7 @@ fn moe_memory_for_quant(model: &LlmModel, quant: &str) -> Option<(f64, f64)> {
 
     let active_params = model.active_parameters? as f64;
     let total_params = model.parameters_raw? as f64;
-    let bpp = models::gguf_quant_bpp(quant);
+    let bpp = models::quant_memory_bpp(quant);
 
     let active_vram = ((active_params * bpp) / 1_000_000_000.0 * 1.1).max(0.5);
     let inactive_params = (total_params - active_params).max(0.0);
@@ -846,7 +843,7 @@ fn estimate_tps(
     if run_mode != RunMode::CpuOnly
         && let Some(bw) = bandwidth
     {
-        let bytes_per_param = models::quant_bytes_per_param(quant);
+        let bytes_per_param = models::quant_bandwidth_bpp(quant);
         let model_gb = params * bytes_per_param;
 
         // Efficiency factor — captures overhead not in the simple
@@ -2116,7 +2113,9 @@ mod tests {
         }
         // Should contain invalid configuration note
         assert!(
-            fit.notes.iter().any(|n| n.contains("invalid configuration")),
+            fit.notes
+                .iter()
+                .any(|n| n.contains("invalid configuration")),
             "Cluster with node_count=0 should report invalid config, got: {:?}",
             fit.notes
         );
@@ -2134,7 +2133,9 @@ mod tests {
         let fit = ModelFit::analyze(&model, &system);
 
         assert!(
-            fit.notes.iter().any(|n| n.contains("invalid configuration")),
+            fit.notes
+                .iter()
+                .any(|n| n.contains("invalid configuration")),
             "Cluster with 1 node should report invalid config, got: {:?}",
             fit.notes
         );

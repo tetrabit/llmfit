@@ -162,7 +162,7 @@ fn estimate_tps_with_gpu(
     gpu_name: Option<&str>,
 ) -> f64 {
     use crate::hardware::gpu_memory_bandwidth_gbps;
-    use crate::models::quant_bytes_per_param;
+    use crate::models::quant_bandwidth_bpp;
 
     let params = model.params_b().max(0.1);
 
@@ -171,7 +171,7 @@ fn estimate_tps_with_gpu(
         && let Some(name) = gpu_name
         && let Some(bw) = gpu_memory_bandwidth_gbps(name)
     {
-        let model_gb = params * quant_bytes_per_param(quant);
+        let model_gb = params * quant_bandwidth_bpp(quant);
         let efficiency = 0.55;
         let raw_tps = (bw / model_gb) * efficiency;
 
