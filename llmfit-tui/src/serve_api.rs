@@ -13,7 +13,7 @@ use llmfit_core::fit::{
     rank_models_by_fit_opts_col,
 };
 use llmfit_core::hardware::{GpuBackend, SystemSpecs};
-use llmfit_core::models::{LlmModel, ModelDatabase, UseCase};
+use llmfit_core::models::{LlmModel, ModelDatabase, ModelFormat, UseCase};
 use serde::{Deserialize, Serialize};
 
 include!(concat!(env!("OUT_DIR"), "/web_assets.rs"));
@@ -382,7 +382,11 @@ fn filtered_fits(
             fits.retain(|f| f.runtime == InferenceRuntime::LlamaCpp);
         }
         RuntimeFilter::LmStudio => {
-            fits.retain(|f| f.runtime == InferenceRuntime::LlamaCpp);
+            fits.retain(|f| {
+                f.runtime == InferenceRuntime::LlamaCpp
+                    && (f.model.format == ModelFormat::Gguf
+                        || !f.model.gguf_sources.is_empty())
+            });
         }
     }
 
