@@ -65,9 +65,7 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) {
         KeyCode::Home | KeyCode::Char('g') => app.home(),
         KeyCode::End | KeyCode::Char('G') => app.end(),
 
-        KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.reset_filters()
-        }
+        KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => app.reset_filters(),
 
         // Visual mode
         KeyCode::Char('v') => app.enter_visual_mode(),
@@ -345,7 +343,10 @@ mod tests {
     use super::handle_normal_mode;
     use crate::tui_app::{AvailabilityFilter, ContextFilter, FitFilter, RuntimeFilter, TpFilter};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    use llmfit_core::{fit::SortColumn, hardware::{GpuBackend, SystemSpecs}};
+    use llmfit_core::{
+        fit::SortColumn,
+        hardware::{GpuBackend, SystemSpecs},
+    };
 
     #[test]
     fn ctrl_r_resets_filters_even_when_runtime_is_available() {
@@ -369,7 +370,7 @@ mod tests {
             None,
         );
         app.search_query = "nemotron".to_string();
-        app.cursor_position = app.search_query.len();
+        app.cursor_position = app.search_query.chars().count();
         app.fit_filter = FitFilter::Runnable;
         app.runtime_filter = RuntimeFilter::LmStudio;
         app.availability_filter = AvailabilityFilter::Installed;

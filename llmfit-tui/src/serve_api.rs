@@ -363,7 +363,10 @@ fn filtered_fits(
             );
             terms.iter().all(|term| {
                 searchable.contains(term)
-                    || llmfit_core::models::context_matches_search_term(term, effective_context_length)
+                    || llmfit_core::models::context_matches_search_term(
+                        term,
+                        effective_context_length,
+                    )
             })
         });
     }
@@ -384,8 +387,7 @@ fn filtered_fits(
         RuntimeFilter::LmStudio => {
             fits.retain(|f| {
                 f.runtime == InferenceRuntime::LlamaCpp
-                    && (f.model.format == ModelFormat::Gguf
-                        || !f.model.gguf_sources.is_empty())
+                    && (f.model.format == ModelFormat::Gguf || !f.model.gguf_sources.is_empty())
             });
         }
     }

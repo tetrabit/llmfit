@@ -1,9 +1,9 @@
 use colored::*;
 use llmfit_core::fit::{FitLevel, InferenceRuntime, ModelFit, RunMode, SortColumn};
 use llmfit_core::hardware::SystemSpecs;
-use llmfit_core::models::{format_context_length, LlmModel};
+use llmfit_core::models::{LlmModel, format_context_length};
 use llmfit_core::plan::PlanEstimate;
-use tabled::{settings::Style, Table, Tabled};
+use tabled::{Table, Tabled, settings::Style};
 
 #[derive(Tabled)]
 struct ModelRow {

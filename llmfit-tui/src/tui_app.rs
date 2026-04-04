@@ -392,7 +392,10 @@ impl FilterState {
                 &app.selected_capabilities,
                 |capability| capability.label(),
             )),
-            selected_quants: Some(App::selected_string_items(&app.quants, &app.selected_quants)),
+            selected_quants: Some(App::selected_string_items(
+                &app.quants,
+                &app.selected_quants,
+            )),
             selected_run_modes: Some(App::selected_string_items(
                 &app.run_modes,
                 &app.selected_run_modes,
@@ -616,7 +619,10 @@ impl App {
             .collect()
     }
 
-    fn apply_saved_string_selection(items: &[String], saved: Option<&[String]>) -> Option<Vec<bool>> {
+    fn apply_saved_string_selection(
+        items: &[String],
+        saved: Option<&[String]>,
+    ) -> Option<Vec<bool>> {
         saved.map(|selected_items| {
             items
                 .iter()
@@ -633,7 +639,11 @@ impl App {
         saved.map(|selected_items| {
             items
                 .iter()
-                .map(|item| selected_items.iter().any(|selected| selected == label(item)))
+                .map(|item| {
+                    selected_items
+                        .iter()
+                        .any(|selected| selected == label(item))
+                })
                 .collect()
         })
     }
@@ -670,10 +680,9 @@ impl App {
         self.sort_column = Self::parse_sort_column(&state.sort_column);
         self.sort_ascending = state.sort_ascending;
 
-        if let Some(selected) = Self::apply_saved_string_selection(
-            &self.providers,
-            state.selected_providers.as_deref(),
-        ) {
+        if let Some(selected) =
+            Self::apply_saved_string_selection(&self.providers, state.selected_providers.as_deref())
+        {
             self.selected_providers = selected;
         }
         if let Some(selected) = Self::apply_saved_labeled_selection(
@@ -690,16 +699,14 @@ impl App {
         ) {
             self.selected_capabilities = selected;
         }
-        if let Some(selected) = Self::apply_saved_string_selection(
-            &self.quants,
-            state.selected_quants.as_deref(),
-        ) {
+        if let Some(selected) =
+            Self::apply_saved_string_selection(&self.quants, state.selected_quants.as_deref())
+        {
             self.selected_quants = selected;
         }
-        if let Some(selected) = Self::apply_saved_string_selection(
-            &self.run_modes,
-            state.selected_run_modes.as_deref(),
-        ) {
+        if let Some(selected) =
+            Self::apply_saved_string_selection(&self.run_modes, state.selected_run_modes.as_deref())
+        {
             self.selected_run_modes = selected;
         }
         if let Some(selected) = Self::apply_saved_string_selection(
@@ -708,10 +715,9 @@ impl App {
         ) {
             self.selected_params_buckets = selected;
         }
-        if let Some(selected) = Self::apply_saved_string_selection(
-            &self.licenses,
-            state.selected_licenses.as_deref(),
-        ) {
+        if let Some(selected) =
+            Self::apply_saved_string_selection(&self.licenses, state.selected_licenses.as_deref())
+        {
             self.selected_licenses = selected;
         }
     }
@@ -850,10 +856,7 @@ impl App {
                     || providers::is_model_installed_vllm(&fit.model.name, &self.vllm_installed)
             }
             RuntimeFilter::LmStudio => {
-                providers::is_model_installed_lmstudio(
-                    &fit.model.name,
-                    &self.lmstudio_installed,
-                )
+                providers::is_model_installed_lmstudio(&fit.model.name, &self.lmstudio_installed)
             }
         }
     }
@@ -2378,20 +2381,24 @@ impl App {
             "MLX model — requires Apple Silicon with MLX installed".to_string()
         } else {
             match format {
-                ModelFormat::Awq => if vllm_available {
-                    "AWQ model — vLLM is installed, but llmfit cannot download AWQ weights automatically yet"
+                ModelFormat::Awq => {
+                    if vllm_available {
+                        "AWQ model — vLLM is installed, but llmfit cannot download AWQ weights automatically yet"
                         .to_string()
-                } else {
-                    "AWQ model — requires vLLM on a CUDA/ROCm GPU; no GGUF conversion available"
+                    } else {
+                        "AWQ model — requires vLLM on a CUDA/ROCm GPU; no GGUF conversion available"
+                            .to_string()
+                    }
+                }
+                ModelFormat::Gptq => {
+                    if vllm_available {
+                        "GPTQ model — vLLM is installed, but llmfit cannot download GPTQ weights automatically yet"
                         .to_string()
-                },
-                ModelFormat::Gptq => if vllm_available {
-                    "GPTQ model — vLLM is installed, but llmfit cannot download GPTQ weights automatically yet"
+                    } else {
+                        "GPTQ model — requires vLLM on a CUDA/ROCm GPU; no GGUF conversion available"
                         .to_string()
-                } else {
-                    "GPTQ model — requires vLLM on a CUDA/ROCm GPU; no GGUF conversion available"
-                        .to_string()
-                },
+                    }
+                }
                 _ => "No downloadable format found for this model".to_string(),
             }
         }
@@ -2554,8 +2561,7 @@ impl App {
                         && !providers::is_model_installed_lmstudio(
                             model_name,
                             &self.lmstudio_installed,
-                        )
-                    {
+                        ) {
                         format!(
                             "LM Studio reported completion, but '{}' is not installed yet",
                             model_name
@@ -2808,7 +2814,9 @@ fn command_exists(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{App, AvailabilityFilter, ContextFilter, FilterState, FitFilter, RuntimeFilter, TpFilter};
+    use super::{
+        App, AvailabilityFilter, ContextFilter, FilterState, FitFilter, RuntimeFilter, TpFilter,
+    };
     use llmfit_core::{
         fit::{FitLevel, InferenceRuntime, ModelFit, RunMode, ScoreComponents},
         hardware::{GpuBackend, SystemSpecs},
@@ -2820,8 +2828,8 @@ mod tests {
     use std::net::{TcpListener, TcpStream};
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
-    use std::sync::{Arc, Mutex, OnceLock};
     use std::sync::mpsc;
+    use std::sync::{Arc, Mutex, OnceLock};
     use std::thread;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -2952,38 +2960,40 @@ mod tests {
             let routes_clone = Arc::clone(&routes);
             let (stop_tx, stop_rx) = mpsc::channel();
 
-            let handle = thread::spawn(move || loop {
-                if stop_rx.try_recv().is_ok() {
-                    break;
-                }
+            let handle = thread::spawn(move || {
+                loop {
+                    if stop_rx.try_recv().is_ok() {
+                        break;
+                    }
 
-                match listener.accept() {
-                    Ok((mut stream, _)) => {
-                        if let Some(request) = read_mock_request(&mut stream) {
-                            requests_clone
-                                .lock()
-                                .expect("requests lock")
-                                .push(request.clone());
-                            let key = format!("{} {}", request.method, request.path);
-                            let response = {
-                                let mut routes = routes_clone.lock().expect("routes lock");
-                                if let Some(queue) = routes.get_mut(&key) {
-                                    if queue.len() > 1 {
-                                        queue.pop_front().expect("queued response")
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            if let Some(request) = read_mock_request(&mut stream) {
+                                requests_clone
+                                    .lock()
+                                    .expect("requests lock")
+                                    .push(request.clone());
+                                let key = format!("{} {}", request.method, request.path);
+                                let response = {
+                                    let mut routes = routes_clone.lock().expect("routes lock");
+                                    if let Some(queue) = routes.get_mut(&key) {
+                                        if queue.len() > 1 {
+                                            queue.pop_front().expect("queued response")
+                                        } else {
+                                            queue.front().cloned().expect("sticky response")
+                                        }
                                     } else {
-                                        queue.front().cloned().expect("sticky response")
+                                        MockHttpResponse::text(404, "not found")
                                     }
-                                } else {
-                                    MockHttpResponse::text(404, "not found")
-                                }
-                            };
-                            write_mock_response(&mut stream, &response);
+                                };
+                                write_mock_response(&mut stream, &response);
+                            }
                         }
+                        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                            thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(_) => break,
                     }
-                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(10));
-                    }
-                    Err(_) => break,
                 }
             });
 
@@ -3355,7 +3365,10 @@ mod tests {
         app.start_download();
 
         assert_eq!(app.input_mode, super::InputMode::DownloadProviderPopup);
-        assert_eq!(app.download_provider_options, vec![super::DownloadProvider::LmStudio]);
+        assert_eq!(
+            app.download_provider_options,
+            vec![super::DownloadProvider::LmStudio]
+        );
         assert_eq!(
             app.download_provider_model.as_deref(),
             Some("HuggingFaceTB/SmolLM3-3B")
@@ -3413,8 +3426,14 @@ mod tests {
         assert_eq!(final_status, "Download complete via LM Studio!");
         assert!(app.lmstudio_available);
         let requests = server.requests();
-        assert!(requests.iter().any(|req| req.method == "POST" && req.path == "/api/v1/models/download" && req.body.contains("lmstudio-community/SmolLM3-3B-GGUF")));
-        assert!(requests.iter().any(|req| req.method == "GET" && req.path == "/api/v1/models/download/status/job-1"));
+        assert!(requests.iter().any(|req| req.method == "POST"
+            && req.path == "/api/v1/models/download"
+            && req.body.contains("lmstudio-community/SmolLM3-3B-GGUF")));
+        assert!(
+            requests.iter().any(
+                |req| req.method == "GET" && req.path == "/api/v1/models/download/status/job-1"
+            )
+        );
     }
 
     #[test]
@@ -3426,7 +3445,8 @@ mod tests {
             receiver: rx,
         });
         app.pull_percent = Some(0.0);
-        app.pull_status = Some("Downloading smollm3-3b-gguf via LM Studio (downloading)".to_string());
+        app.pull_status =
+            Some("Downloading smollm3-3b-gguf via LM Studio (downloading)".to_string());
 
         tx.send(llmfit_core::providers::PullEvent::Progress {
             status: "Downloading smollm3-3b-gguf via LM Studio (waiting for progress...)"
@@ -3457,7 +3477,10 @@ mod tests {
             ),
             (
                 "POST /api/v1/models/download".to_string(),
-                vec![MockHttpResponse::json(200, r#"{"status":"already_downloaded"}"#)],
+                vec![MockHttpResponse::json(
+                    200,
+                    r#"{"status":"already_downloaded"}"#,
+                )],
             ),
         ]);
         let _env = EnvGuard::install(Some(&server.base_url()), None);
@@ -3506,7 +3529,11 @@ mod tests {
 
         assert_eq!(final_status, "Download complete via LM Studio!");
         let commands = fake_cli.logged_commands();
-        assert!(commands.iter().any(|cmd| cmd == "get SmolLM3-3B-GGUF --yes"));
+        assert!(
+            commands
+                .iter()
+                .any(|cmd| cmd == "get SmolLM3-3B-GGUF --yes")
+        );
     }
 
     #[test]
@@ -3538,7 +3565,11 @@ mod tests {
 
         assert!(final_status.contains("CLI fallback failed"));
         let commands = fake_cli.logged_commands();
-        assert!(commands.iter().any(|cmd| cmd == "get SmolLM3-3B-GGUF --yes"));
+        assert!(
+            commands
+                .iter()
+                .any(|cmd| cmd == "get SmolLM3-3B-GGUF --yes")
+        );
     }
 
     #[test]
@@ -3560,7 +3591,11 @@ mod tests {
         assert_eq!(final_status, "Download complete via LM Studio!");
         let commands = fake_cli.logged_commands();
         assert!(commands.iter().any(|cmd| cmd == "server start"));
-        assert!(commands.iter().any(|cmd| cmd == "get smollm3-3b-gguf --yes"));
+        assert!(
+            commands
+                .iter()
+                .any(|cmd| cmd == "get smollm3-3b-gguf --yes")
+        );
     }
 
     #[test]
@@ -3579,7 +3614,10 @@ mod tests {
             ),
             (
                 "POST /api/v1/models/download".to_string(),
-                vec![MockHttpResponse::json(200, r#"{"status":"already_downloaded"}"#)],
+                vec![MockHttpResponse::json(
+                    200,
+                    r#"{"status":"already_downloaded"}"#,
+                )],
             ),
         ]);
         let _env = EnvGuard::install(Some(&server.base_url()), None);
@@ -3711,8 +3749,16 @@ mod tests {
 
         app.tick_pull();
 
-        assert_eq!(app.pull_status.as_deref(), Some("LM Studio CLI: ⠋ [████████████▌         ]  57.23% |  2.67 GB /  4.68 GB |  45.12 MB/s | ETA 00:43"));
-        assert!(app.pull_percent.is_some_and(|pct| (pct - 57.23).abs() < 0.01));
+        assert_eq!(
+            app.pull_status.as_deref(),
+            Some(
+                "LM Studio CLI: ⠋ [████████████▌         ]  57.23% |  2.67 GB /  4.68 GB |  45.12 MB/s | ETA 00:43"
+            )
+        );
+        assert!(
+            app.pull_percent
+                .is_some_and(|pct| (pct - 57.23).abs() < 0.01)
+        );
     }
 
     #[test]
@@ -3736,7 +3782,9 @@ mod tests {
 
         assert_eq!(
             app.pull_status.as_deref(),
-            Some("LM Studio API unavailable (http status: 404); falling back to CLI (gemma-3n-E2B-it)")
+            Some(
+                "LM Studio API unavailable (http status: 404); falling back to CLI (gemma-3n-E2B-it)"
+            )
         );
         assert_eq!(app.pull_percent, None);
     }
@@ -3754,10 +3802,16 @@ mod tests {
     fn filter_label_parsers_fallback_to_defaults() {
         assert_eq!(FitFilter::from_label("unknown"), FitFilter::All);
         assert_eq!(RuntimeFilter::from_label("unknown"), RuntimeFilter::Any);
-        assert_eq!(AvailabilityFilter::from_label("unknown"), AvailabilityFilter::All);
+        assert_eq!(
+            AvailabilityFilter::from_label("unknown"),
+            AvailabilityFilter::All
+        );
         assert_eq!(TpFilter::from_label("unknown"), TpFilter::All);
         assert_eq!(ContextFilter::from_label("unknown"), ContextFilter::All);
-        assert_eq!(App::parse_sort_column("unknown"), llmfit_core::fit::SortColumn::Score);
+        assert_eq!(
+            App::parse_sort_column("unknown"),
+            llmfit_core::fit::SortColumn::Score
+        );
     }
 
     #[test]
@@ -3817,7 +3871,10 @@ mod tests {
         assert_eq!(loaded.selected_capabilities, state.selected_capabilities);
         assert_eq!(loaded.selected_quants, state.selected_quants);
         assert_eq!(loaded.selected_run_modes, state.selected_run_modes);
-        assert_eq!(loaded.selected_params_buckets, state.selected_params_buckets);
+        assert_eq!(
+            loaded.selected_params_buckets,
+            state.selected_params_buckets
+        );
 
         let _ = fs::remove_file(path);
     }
@@ -4011,7 +4068,7 @@ mod tests {
         app.sort_column = llmfit_core::fit::SortColumn::Params;
         app.sort_ascending = true;
         app.search_query = "nemotron".to_string();
-        app.cursor_position = app.search_query.len();
+        app.cursor_position = app.search_query.chars().count();
         if !app.selected_providers.is_empty() {
             app.selected_providers.fill(false);
         }

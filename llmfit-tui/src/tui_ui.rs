@@ -1,4 +1,5 @@
 use ratatui::{
+    Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
@@ -6,18 +7,18 @@ use ratatui::{
         Block, Borders, Cell, Clear, Paragraph, Row, Scrollbar, ScrollbarOrientation,
         ScrollbarState, Table, TableState, Wrap,
     },
-    Frame,
 };
 
 use crate::theme::ThemeColors;
 use crate::tui_app::{
-    App, AvailabilityFilter, DownloadCapability, DownloadProvider, FitFilter, InputMode, PlanField,
-    RuntimeFilter, DL_DOCKER, DL_LLAMACPP, DL_LMSTUDIO, DL_OLLAMA,
+    App, AvailabilityFilter, DL_DOCKER, DL_LLAMACPP, DL_LMSTUDIO, DL_OLLAMA, DownloadCapability,
+    DownloadProvider, FitFilter, InputMode, PlanField, RuntimeFilter,
 };
 use llmfit_core::fit::{FitLevel, ModelFit, SortColumn};
 use llmfit_core::hardware::is_running_in_wsl;
 use llmfit_core::models::format_context_length;
 use llmfit_core::providers;
+use unicode_width::UnicodeWidthStr;
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let tc = app.theme.colors();
@@ -319,10 +320,17 @@ fn draw_search_and_filters(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeC
     frame.render_widget(search, chunks[0]);
 
     if app.input_mode == InputMode::Search {
-        frame.set_cursor_position((
-            chunks[0].x + app.cursor_position as u16 + 1,
-            chunks[0].y + 1,
-        ));
+        // Compute the display width of characters before the cursor.
+        // cursor_position is a char index, so take that many chars and
+        // measure their display width to correctly handle multi-byte and
+        // wide characters (CJK, emoji, accented chars).
+        let display_offset: usize = app
+            .search_query
+            .chars()
+            .take(app.cursor_position)
+            .collect::<String>()
+            .width();
+        frame.set_cursor_position((chunks[0].x + display_offset as u16 + 1, chunks[0].y + 1));
     }
 
     // Provider filter summary
