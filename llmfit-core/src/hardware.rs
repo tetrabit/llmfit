@@ -807,6 +807,8 @@ impl SystemSpecs {
 
     /// Detect GPUs on Windows via WMI (Win32_VideoController).
     /// Returns all discrete GPUs found (AMD, NVIDIA, Intel, etc.).
+    /// When both discrete and integrated GPUs are present, the integrated
+    /// GPUs are filtered out so the discrete GPU is selected as primary.
     fn detect_gpu_windows_info() -> Vec<GpuInfo> {
         if !cfg!(target_os = "windows") {
             return Vec::new();
@@ -822,12 +824,13 @@ impl SystemSpecs {
                 && let Ok(text) = String::from_utf8(output.stdout) {
                     let gpus = Self::parse_windows_gpu_list(&text);
                     if !gpus.is_empty() {
-                        return gpus;
+                        return Self::prefer_discrete_gpus(gpus);
                     }
                 }
 
         // Fallback to wmic for older Windows
-        Self::detect_gpu_windows_wmic_list()
+        let gpus = Self::detect_gpu_windows_wmic_list();
+        Self::prefer_discrete_gpus(gpus)
     }
 
     /// Fallback Windows GPU detection via wmic (works on older systems).
@@ -916,6 +919,51 @@ impl SystemSpecs {
             });
         }
         gpus
+    }
+
+    /// When both discrete and integrated GPUs are detected on Windows,
+    /// drop the integrated GPUs so the discrete GPU becomes primary.
+    /// If only integrated GPUs are present, keep them all (iGPU-only systems).
+    fn prefer_discrete_gpus(gpus: Vec<GpuInfo>) -> Vec<GpuInfo> {
+        let discrete: Vec<GpuInfo> = gpus
+            .iter()
+            .filter(|g| !Self::is_integrated_gpu_name(&g.name))
+            .cloned()
+            .collect();
+
+        if discrete.is_empty() {
+            // No discrete GPUs found; keep everything (iGPU-only system).
+            gpus
+        } else {
+            discrete
+        }
+    }
+
+    /// Heuristic: returns true when the GPU name matches known integrated GPU
+    /// patterns on Windows (Intel UHD/HD/Iris, AMD Radeon Graphics without a
+    /// discrete model number like RX).
+    fn is_integrated_gpu_name(name: &str) -> bool {
+        let lower = name.to_lowercase();
+
+        // Intel integrated: UHD, HD Graphics, Iris (but NOT Intel Arc discrete)
+        if lower.contains("intel") {
+            return lower.contains("uhd")
+                || lower.contains("hd graphics")
+                || (lower.contains("iris") && !lower.contains("arc"));
+        }
+
+        // AMD integrated: "Radeon Graphics" or "Radeon(TM) Graphics" without
+        // a discrete series identifier (RX, PRO, Vega 56/64, VII, W-series).
+        if lower.contains("radeon") && lower.contains("graphics") {
+            let has_discrete_tag = lower.contains("rx ")
+                || lower.contains("pro ")
+                || lower.contains("vega")
+                || lower.contains(" vii")
+                || lower.contains(" w");
+            return !has_discrete_tag;
+        }
+
+        false
     }
 
     /// WMI AdapterRAM is a 32-bit field, capped at ~4 GB.
@@ -2841,6 +2889,94 @@ GPU id = 1 (NVIDIA GeForce RTX 4090)
             super::gpu_compute_capability("AMD Radeon RX 7900 XTX"),
             None
         );
+    }
+
+    #[test]
+    fn test_is_integrated_gpu_name() {
+        // Intel integrated
+        assert!(SystemSpecs::is_integrated_gpu_name(
+            "Intel(R) UHD Graphics 770"
+        ));
+        assert!(SystemSpecs::is_integrated_gpu_name(
+            "Intel(R) HD Graphics 630"
+        ));
+        assert!(SystemSpecs::is_integrated_gpu_name(
+            "Intel(R) Iris(R) Xe Graphics"
+        ));
+        assert!(SystemSpecs::is_integrated_gpu_name(
+            "Intel(R) Iris(R) Plus Graphics"
+        ));
+        // Intel discrete should NOT match
+        assert!(!SystemSpecs::is_integrated_gpu_name(
+            "Intel(R) Arc(TM) A770"
+        ));
+        assert!(!SystemSpecs::is_integrated_gpu_name(
+            "Intel(R) Arc(TM) B580"
+        ));
+    }
+
+    #[test]
+    fn test_is_integrated_gpu_name_amd() {
+        // AMD integrated (generic "Radeon Graphics" with no RX/PRO)
+        assert!(SystemSpecs::is_integrated_gpu_name(
+            "AMD Radeon(TM) Graphics"
+        ));
+        assert!(SystemSpecs::is_integrated_gpu_name("AMD Radeon Graphics"));
+        // AMD discrete should NOT match
+        assert!(!SystemSpecs::is_integrated_gpu_name(
+            "AMD Radeon RX 7900 XTX"
+        ));
+        assert!(!SystemSpecs::is_integrated_gpu_name("AMD Radeon Pro W7900"));
+    }
+
+    #[test]
+    fn test_is_integrated_gpu_name_nvidia() {
+        // NVIDIA GPUs are never integrated in the traditional sense
+        assert!(!SystemSpecs::is_integrated_gpu_name(
+            "NVIDIA GeForce RTX 4090"
+        ));
+        assert!(!SystemSpecs::is_integrated_gpu_name(
+            "NVIDIA GeForce GTX 1650"
+        ));
+    }
+
+    #[test]
+    fn test_prefer_discrete_gpus_filters_integrated() {
+        use super::GpuBackend;
+        let gpus = vec![
+            super::GpuInfo {
+                name: "Intel(R) UHD Graphics 770".to_string(),
+                vram_gb: Some(8.0),
+                backend: GpuBackend::Vulkan,
+                count: 1,
+                unified_memory: false,
+            },
+            super::GpuInfo {
+                name: "NVIDIA GeForce RTX 4090".to_string(),
+                vram_gb: Some(4.0), // WMI 32-bit cap may report low value
+                backend: GpuBackend::Cuda,
+                count: 1,
+                unified_memory: false,
+            },
+        ];
+        let result = SystemSpecs::prefer_discrete_gpus(gpus);
+        assert_eq!(result.len(), 1);
+        assert!(result[0].name.contains("RTX 4090"));
+    }
+
+    #[test]
+    fn test_prefer_discrete_gpus_keeps_igpu_only() {
+        use super::GpuBackend;
+        let gpus = vec![super::GpuInfo {
+            name: "Intel(R) UHD Graphics 770".to_string(),
+            vram_gb: Some(2.0),
+            backend: GpuBackend::Vulkan,
+            count: 1,
+            unified_memory: false,
+        }];
+        let result = SystemSpecs::prefer_discrete_gpus(gpus);
+        assert_eq!(result.len(), 1);
+        assert!(result[0].name.contains("UHD"));
     }
 
     #[test]

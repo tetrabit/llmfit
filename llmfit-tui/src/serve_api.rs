@@ -2,11 +2,11 @@ use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, LazyLock};
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
 use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use llmfit_core::fit::{
     FitLevel, InferenceRuntime, ModelFit, SortColumn, backend_compatible,
@@ -14,6 +14,11 @@ use llmfit_core::fit::{
 };
 use llmfit_core::hardware::{GpuBackend, SystemSpecs};
 use llmfit_core::models::{LlmModel, ModelDatabase, ModelFormat, UseCase};
+use llmfit_core::plan::{PlanRequest, estimate_model_plan};
+use llmfit_core::providers::{
+    DockerModelRunnerProvider, LlamaCppProvider, LmStudioProvider, MlxProvider, ModelProvider,
+    OllamaProvider, PullEvent,
+};
 use serde::{Deserialize, Serialize};
 
 include!(concat!(env!("OUT_DIR"), "/web_assets.rs"));
@@ -21,13 +26,29 @@ include!(concat!(env!("OUT_DIR"), "/web_assets.rs"));
 static ASSET_MAP: LazyLock<HashMap<&'static str, &'static EmbeddedAsset>> =
     LazyLock::new(|| EMBEDDED_WEB_ASSETS.iter().map(|a| (a.path, a)).collect());
 
-#[derive(Clone)]
 struct AppState {
     node_name: String,
     os: String,
     specs: SystemSpecs,
     models: Vec<LlmModel>,
     context_limit: Option<u32>,
+    active_download: tokio::sync::RwLock<Option<ActiveDownload>>,
+    download_counter: std::sync::atomic::AtomicU32,
+}
+
+struct ActiveDownload {
+    id: String,
+    model_name: String,
+    runtime: String,
+    status: String,
+    progress_pct: f64,
+    message: String,
+}
+
+#[derive(Debug, Serialize)]
+struct InstalledModel {
+    name: String,
+    runtime: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -71,18 +92,19 @@ struct ApiError {
 }
 
 impl ApiError {
-    fn bad_request(message: impl Into<String>) -> Self {
+    fn new(status: StatusCode, message: impl Into<String>) -> Self {
         Self {
-            status: StatusCode::BAD_REQUEST,
+            status,
             message: message.into(),
         }
     }
 
+    fn bad_request(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::BAD_REQUEST, message)
+    }
+
     fn internal(message: impl Into<String>) -> Self {
-        Self {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            message: message.into(),
-        }
+        Self::new(StatusCode::INTERNAL_SERVER_ERROR, message)
     }
 }
 
@@ -126,6 +148,8 @@ pub fn run_serve(
         specs,
         models: all_models,
         context_limit,
+        active_download: tokio::sync::RwLock::new(None),
+        download_counter: std::sync::atomic::AtomicU32::new(0),
     });
 
     let app = build_router(state);
@@ -149,12 +173,15 @@ pub fn run_serve(
                 .await
                 .map_err(|e| ApiError::internal(format!("bind failed on {addr}: {e}")))?;
 
-            axum::serve(listener, app)
-                .with_graceful_shutdown(async {
-                    let _ = tokio::signal::ctrl_c().await;
-                })
-                .await
-                .map_err(|e| ApiError::internal(format!("server error: {e}")))
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .with_graceful_shutdown(async {
+                let _ = tokio::signal::ctrl_c().await;
+            })
+            .await
+            .map_err(|e| ApiError::internal(format!("server error: {e}")))
         })
         .map_err(|e| e.message)
 }
@@ -168,6 +195,11 @@ fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/v1/models", get(models))
         .route("/api/v1/models/top", get(top_models))
         .route("/api/v1/models/{name}", get(model_by_name))
+        .route("/api/v1/runtimes", get(runtimes))
+        .route("/api/v1/installed", get(installed))
+        .route("/api/v1/download", post(start_download))
+        .route("/api/v1/download/{id}/status", get(download_status))
+        .route("/api/v1/plan", post(plan_estimate))
         .route("/{*path}", get(spa_fallback))
         .with_state(state)
 }
@@ -315,6 +347,297 @@ async fn model_by_name(
     };
 
     Ok(Json(envelope))
+}
+
+#[derive(Deserialize)]
+struct DownloadBody {
+    model: String,
+    runtime: String,
+}
+
+#[derive(Deserialize)]
+struct PlanBody {
+    model: String,
+    context: u32,
+    quant: Option<String>,
+    target_tps: Option<f64>,
+}
+
+async fn runtimes(State(_state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let mut set = tokio::task::JoinSet::new();
+
+    set.spawn_blocking(|| ("ollama", OllamaProvider::new().is_available()));
+    set.spawn_blocking(|| ("mlx", MlxProvider::new().is_available()));
+    set.spawn_blocking(|| ("llamacpp", LlamaCppProvider::new().is_available()));
+    set.spawn_blocking(|| {
+        (
+            "docker_model_runner",
+            DockerModelRunnerProvider::new().is_available(),
+        )
+    });
+    set.spawn_blocking(|| ("lmstudio", LmStudioProvider::new().is_available()));
+
+    let mut runtimes = Vec::new();
+    let mut warnings = Vec::new();
+    while let Some(result) = set.join_next().await {
+        match result {
+            Ok((name, available)) => {
+                runtimes.push(serde_json::json!({ "name": name, "installed": available }));
+            }
+            Err(e) => {
+                warnings.push(format!("provider check failed: {e}"));
+            }
+        }
+    }
+
+    Json(serde_json::json!({ "runtimes": runtimes, "warnings": warnings }))
+}
+
+async fn installed(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let mut set = tokio::task::JoinSet::new();
+
+    set.spawn_blocking(|| {
+        let p = OllamaProvider::new();
+        ("ollama", p.is_available(), p.installed_models())
+    });
+    set.spawn_blocking(|| {
+        let p = MlxProvider::new();
+        ("mlx", p.is_available(), p.installed_models())
+    });
+    set.spawn_blocking(|| {
+        let p = LlamaCppProvider::new();
+        ("llamacpp", p.is_available(), p.installed_models())
+    });
+    set.spawn_blocking(|| {
+        let p = DockerModelRunnerProvider::new();
+        (
+            "docker_model_runner",
+            p.is_available(),
+            p.installed_models(),
+        )
+    });
+    set.spawn_blocking(|| {
+        let p = LmStudioProvider::new();
+        ("lmstudio", p.is_available(), p.installed_models())
+    });
+
+    let mut models = Vec::new();
+    let mut warnings = Vec::new();
+    while let Some(result) = set.join_next().await {
+        match result {
+            Ok((name, available, installed_set)) => {
+                if !available {
+                    continue;
+                }
+                for model_name in installed_set {
+                    models.push(InstalledModel {
+                        name: model_name,
+                        runtime: name.to_string(),
+                    });
+                }
+            }
+            Err(e) => {
+                warnings.push(format!("provider check failed: {e}"));
+            }
+        }
+    }
+
+    Json(serde_json::json!({
+        "models": models,
+        "warnings": warnings,
+    }))
+}
+
+async fn start_download(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Json(body): Json<DownloadBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if !addr.ip().is_loopback() {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "Downloads restricted to localhost",
+        ));
+    }
+
+    {
+        let dl = state.active_download.read().await;
+        if let Some(ref d) = *dl {
+            if d.status == "pulling" {
+                return Err(ApiError::bad_request(format!(
+                    "download '{}' already in progress; wait for it to complete or error",
+                    d.id
+                )));
+            }
+        }
+    }
+
+    let id = {
+        let n = state
+            .download_counter
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        format!("dl-{n}")
+    };
+
+    {
+        let mut dl = state.active_download.write().await;
+        *dl = Some(ActiveDownload {
+            id: id.clone(),
+            model_name: body.model.clone(),
+            runtime: body.runtime.clone(),
+            status: "pulling".to_string(),
+            progress_pct: 0.0,
+            message: "starting".to_string(),
+        });
+    }
+
+    let download_id = id.clone();
+    let model_name = body.model.clone();
+    let runtime = body.runtime.clone();
+    let state_bg = Arc::clone(&state);
+
+    // Use a tokio mpsc channel to relay PullEvents from the blocking thread
+    // into the async task that updates the RwLock.
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<PullEvent>();
+
+    // Blocking thread: start the pull and forward events over the tokio channel.
+    tokio::task::spawn_blocking(move || {
+        let handle_result = match runtime.as_str() {
+            "ollama" => OllamaProvider::new().start_pull(&model_name),
+            "mlx" => MlxProvider::new().start_pull(&model_name),
+            "llamacpp" => LlamaCppProvider::new().start_pull(&model_name),
+            "docker_model_runner" => DockerModelRunnerProvider::new().start_pull(&model_name),
+            "lmstudio" => LmStudioProvider::new().start_pull(&model_name),
+            other => {
+                let _ = event_tx.send(PullEvent::Error(format!("unknown runtime: {other}")));
+                return;
+            }
+        };
+
+        match handle_result {
+            Ok(handle) => loop {
+                match handle.receiver.recv() {
+                    Ok(event @ PullEvent::Progress { .. }) => {
+                        if event_tx.send(event).is_err() {
+                            return;
+                        }
+                    }
+                    Ok(PullEvent::Done) => {
+                        let _ = event_tx.send(PullEvent::Done);
+                        return;
+                    }
+                    Ok(PullEvent::Error(e)) => {
+                        let _ = event_tx.send(PullEvent::Error(e));
+                        return;
+                    }
+                    Err(_) => {
+                        let _ = event_tx.send(PullEvent::Error(
+                            "download channel closed unexpectedly".to_string(),
+                        ));
+                        return;
+                    }
+                }
+            },
+            Err(e) => {
+                let _ = event_tx.send(PullEvent::Error(e));
+            }
+        }
+    });
+
+    // Async task: consume events from the channel and update shared state.
+    tokio::task::spawn(async move {
+        while let Some(event) = event_rx.recv().await {
+            let mut dl = state_bg.active_download.write().await;
+            if let Some(ref mut d) = *dl {
+                if d.id != download_id {
+                    break;
+                }
+                match event {
+                    PullEvent::Progress { status, percent } => {
+                        d.status = "pulling".to_string();
+                        d.progress_pct = percent.unwrap_or(d.progress_pct);
+                        d.message = status;
+                    }
+                    PullEvent::Done => {
+                        d.status = "done".to_string();
+                        d.progress_pct = 100.0;
+                        d.message = "completed".to_string();
+                        break;
+                    }
+                    PullEvent::Error(e) => {
+                        d.status = "error".to_string();
+                        d.message = e;
+                        break;
+                    }
+                }
+            }
+        }
+    });
+
+    Ok(Json(serde_json::json!({
+        "id": id,
+        "model": body.model,
+        "runtime": body.runtime,
+        "status": "pulling",
+    })))
+}
+
+async fn download_status(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if !addr.ip().is_loopback() {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "Download status restricted to localhost",
+        ));
+    }
+    let dl = state.active_download.read().await;
+    match dl.as_ref() {
+        Some(d) if d.id == id => Ok(Json(serde_json::json!({
+            "id": d.id,
+            "model": d.model_name,
+            "runtime": d.runtime,
+            "status": d.status,
+            "progress_pct": d.progress_pct,
+            "message": d.message,
+        }))),
+        _ => Err(ApiError::new(
+            StatusCode::NOT_FOUND,
+            format!("no download with id '{id}'"),
+        )),
+    }
+}
+
+async fn plan_estimate(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Json(body): Json<PlanBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if !addr.ip().is_loopback() {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "Plan restricted to localhost",
+        ));
+    }
+
+    let model = state
+        .models
+        .iter()
+        .find(|m| m.name.eq_ignore_ascii_case(&body.model))
+        .ok_or_else(|| ApiError::bad_request(format!("model '{}' not found", body.model)))?;
+
+    let request = PlanRequest {
+        context: body.context,
+        quant: body.quant,
+        target_tps: body.target_tps,
+    };
+
+    match estimate_model_plan(model, &request, &state.specs) {
+        Ok(estimate) => Ok(Json(serde_json::json!(estimate))),
+        Err(e) => Err(ApiError::bad_request(e)),
+    }
 }
 
 fn filtered_fits(
@@ -639,6 +962,9 @@ fn fit_to_json(fit: &ModelFit) -> serde_json::Value {
         "utilization_pct": round1(fit.utilization_pct),
         "notes": fit.notes,
         "gguf_sources": fit.model.gguf_sources,
+        "capabilities": fit.model.capabilities,
+        "license": fit.model.license,
+        "supports_tp": fit.model.valid_tp_sizes(),
     })
 }
 
@@ -680,6 +1006,8 @@ mod tests {
             specs: SystemSpecs::detect(),
             models: db.get_all_models().clone(),
             context_limit: None,
+            active_download: tokio::sync::RwLock::new(None),
+            download_counter: std::sync::atomic::AtomicU32::new(0),
         })
     }
 

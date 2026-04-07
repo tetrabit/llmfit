@@ -1770,10 +1770,10 @@ impl LmStudioProvider {
             }
             return (true, set, 0);
         };
-        let models = list.models;
+        let models = list.data;
         let count = models.len();
         for m in models {
-            let lower = m.key.to_lowercase();
+            let lower = m.id.to_lowercase();
             set.insert(lower.clone());
             // Also insert the model part after the publisher (e.g. "lmstudio-community/Qwen3-1.7B-MLX-4bit" → "qwen3-1.7b-mlx-4bit")
             if let Some(name) = lower.split('/').next_back()
@@ -1963,13 +1963,13 @@ fn rewrite_lmstudio_cli_error_for_fallback(message: String) -> String {
 
 #[derive(serde::Deserialize)]
 struct LmStudioModelList {
-    models: Vec<LmStudioModel>,
+    data: Vec<LmStudioModel>,
 }
 
 #[derive(serde::Deserialize)]
 struct LmStudioModel {
-    /// Model key, e.g. "lmstudio-community/Qwen3-1.7B-MLX-4bit"
-    key: String,
+    /// Model id, e.g. "lmstudio-community/Qwen3-1.7B-MLX-4bit"
+    id: String,
 }
 
 #[derive(serde::Deserialize)]

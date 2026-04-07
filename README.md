@@ -45,6 +45,11 @@ If Scoop is not installed, follow the [Scoop installation guide](https://scoop.s
 brew install llmfit
 ```
 
+### MacPorts
+```sh
+port install llmfit
+```
+
 #### Quick install
 ```sh
 curl -fsSL https://llmfit.axjns.dev/install.sh | sh
@@ -102,6 +107,9 @@ Launches the interactive terminal UI. Your system specs (CPU, RAM, GPU name, VRA
 | `P`                        | Open provider filter popup                                            |
 | `U`                        | Open use-case filter popup                                            |
 | `C`                        | Open capability filter popup                                          |
+| `L`                        | Open license filter popup                                             |
+| `R`                        | Open runtime/backend filter popup (llama.cpp, MLX, vLLM)             |
+| `h`                        | Open help popup (all key bindings)                                    |
 | `m`                        | Mark selected model for compare                                       |
 | `c`                        | Open compare view (marked vs selected)                                |
 | `x`                        | Clear compare mark                                                    |

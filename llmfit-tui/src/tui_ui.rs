@@ -73,6 +73,10 @@ pub fn draw(frame: &mut Frame, app: &App) {
         draw_params_bucket_popup(frame, app, &tc);
     } else if app.input_mode == InputMode::LicensePopup {
         draw_license_popup(frame, app, &tc);
+    } else if app.input_mode == InputMode::RuntimePopup {
+        draw_runtime_popup(frame, app, &tc);
+    } else if app.input_mode == InputMode::HelpPopup {
+        draw_help_popup(frame, app, &tc);
     }
 }
 
@@ -298,7 +302,9 @@ fn draw_search_and_filters(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeC
         | InputMode::QuantPopup
         | InputMode::RunModePopup
         | InputMode::ParamsBucketPopup
-        | InputMode::LicensePopup => Style::default().fg(tc.muted),
+        | InputMode::LicensePopup
+        | InputMode::RuntimePopup
+        | InputMode::HelpPopup => Style::default().fg(tc.muted),
     };
 
     let search_text = if app.search_query.is_empty() && app.input_mode == InputMode::Normal {
@@ -614,17 +620,17 @@ fn pull_indicator(percent: Option<f64>, tick: u64) -> String {
 fn draw_table(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
     let sort_col = app.sort_column;
     let header_names = [
-        "", "Inst", "Model", "Provider", "Params", "Score", "tok/s*", "Quant", "Mode", "Mem %",
-        "Ctx", "Date", "Fit", "Use Case",
+        "", "Inst", "Model", "Provider", "Params", "Score", "tok/s*", "Quant", "Disk", "Mode",
+        "Mem %", "Ctx", "Date", "Fit", "Use Case",
     ];
     let sort_col_idx: Option<usize> = match sort_col {
         SortColumn::Score => Some(5),
         SortColumn::Tps => Some(6),
         SortColumn::Params => Some(4),
-        SortColumn::MemPct => Some(9),
-        SortColumn::Ctx => Some(10),
-        SortColumn::ReleaseDate => Some(11),
-        SortColumn::UseCase => Some(13),
+        SortColumn::MemPct => Some(10),
+        SortColumn::Ctx => Some(11),
+        SortColumn::ReleaseDate => Some(12),
+        SortColumn::UseCase => Some(14),
     };
     let in_select_mode = app.input_mode == InputMode::Select;
     let header_cells = header_names.iter().enumerate().map(|(i, h)| {
@@ -765,6 +771,11 @@ fn draw_table(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
                 Cell::from(format!("{:.0}", fit.score)).style(Style::default().fg(score_color)),
                 Cell::from(tps_text).style(Style::default().fg(tc.fg)),
                 Cell::from(fit.best_quant.clone()).style(Style::default().fg(tc.muted)),
+                Cell::from(format!(
+                    "{:.1}G",
+                    fit.model.estimate_disk_gb(&fit.best_quant)
+                ))
+                .style(Style::default().fg(tc.muted)),
                 Cell::from(fit.run_mode_text().to_string()).style(Style::default().fg(mode_color)),
                 Cell::from(format!("{:.0}%", fit.utilization_pct))
                     .style(Style::default().fg(color)),
@@ -795,6 +806,7 @@ fn draw_table(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
         Constraint::Length(6),  // score
         Constraint::Length(6),  // tok/s
         Constraint::Length(10), // quant (AWQ-4bit, GPTQ-Int4, GPTQ-Int8)
+        Constraint::Length(6),  // disk
         Constraint::Length(7),  // mode
         Constraint::Length(6),  // mem %
         Constraint::Length(5),  // ctx
@@ -1123,6 +1135,13 @@ fn render_compare_panel(
             Span::styled(metrics.mem.clone(), metrics.mem_style),
         ]),
         Line::from(vec![
+            Span::styled("  Disk:  ", Style::default().fg(tc.muted)),
+            Span::styled(
+                format!(" {:.1} GB", fit.model.estimate_disk_gb(&fit.best_quant)),
+                Style::default().fg(tc.fg),
+            ),
+        ]),
+        Line::from(vec![
             Span::styled("  Runtime:", Style::default().fg(tc.muted)),
             Span::styled(
                 format!(" {}", fit.runtime_text()),
@@ -1328,6 +1347,16 @@ fn draw_multi_compare(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors
                 }
             })
             .collect(),
+    });
+
+    // Disk
+    rows.push(AttrRow {
+        label: "Disk",
+        values: visible_models
+            .iter()
+            .map(|m| format!("{:.1} GB", m.model.estimate_disk_gb(&m.best_quant)))
+            .collect(),
+        styles: vec![Style::default().fg(tc.muted); n],
     });
 
     // Params
@@ -1874,7 +1903,43 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
                 Style::default().fg(tc.muted),
             ),
         ]),
+        Line::from(vec![
+            Span::styled("  Disk (est):  ", Style::default().fg(tc.muted)),
+            Span::styled(
+                format!("{:.1} GB", fit.model.estimate_disk_gb(&fit.best_quant)),
+                Style::default().fg(tc.fg),
+            ),
+            Span::styled(
+                format!("  (at {})", fit.best_quant),
+                Style::default().fg(tc.muted),
+            ),
+        ]),
     ]);
+
+    // Disk size breakdown per quant level
+    let quants: &[&str] = if fit.best_quant.starts_with("mlx") {
+        &["mlx-8bit", "mlx-4bit"]
+    } else {
+        &["Q8_0", "Q6_K", "Q5_K_M", "Q4_K_M", "Q3_K_M", "Q2_K"]
+    };
+    let mut disk_spans: Vec<Span> = vec![Span::styled(
+        "  Disk/quant:  ",
+        Style::default().fg(tc.muted),
+    )];
+    for (i, &q) in quants.iter().enumerate() {
+        if i > 0 {
+            disk_spans.push(Span::styled("  ", Style::default()));
+        }
+        let size = fit.model.estimate_disk_gb(q);
+        let text = format!("{}: {:.1}G", q, size);
+        let style = if q == fit.best_quant {
+            Style::default().fg(tc.good).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(tc.muted)
+        };
+        disk_spans.push(Span::styled(text, style));
+    }
+    lines.push(Line::from(disk_spans));
 
     // Build right-pane content (GGUF sources + notes)
     let has_right_pane = !fit.model.gguf_sources.is_empty() || !fit.notes.is_empty();
@@ -2445,7 +2510,7 @@ fn status_keys_and_mode(app: &App) -> (Vec<String>, String) {
             (
                 vec![
                     format!(
-                        " ↑↓/jk:nav  {}  /:search  f:fit  w:runtime  K:ctx  s:sort  Ctrl-R:reset  v:visual  V:select  t:theme",
+                        " ↑↓/jk:nav  {}  /:search  f:fit  w:runtime  K:ctx  s:sort  Ctrl-R:reset  v:visual  V:select  t:theme  R:runtime  h:help",
                         detail_key,
                     ),
                     format!(
@@ -2522,6 +2587,14 @@ fn status_keys_and_mode(app: &App) -> (Vec<String>, String) {
         InputMode::LicensePopup => (
             vec!["  ↑↓/jk:navigate  Space:toggle  a:all/none  Esc:close".to_string()],
             "LICENSE".to_string(),
+        ),
+        InputMode::RuntimePopup => (
+            vec!["  ↑↓/jk:navigate  Space:toggle  a:all/none  Esc:close".to_string()],
+            "RUNTIME".to_string(),
+        ),
+        InputMode::HelpPopup => (
+            vec!["  ↑↓/jk:scroll  Esc/h/q:close".to_string()],
+            "HELP".to_string(),
         ),
     }
 }
@@ -2657,6 +2730,182 @@ fn draw_params_bucket_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
         tc,
         None,
     );
+}
+
+fn draw_help_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
+    let area = frame.area();
+
+    let popup_width = 52.min(area.width.saturating_sub(4));
+    let popup_height = (area.height - 4).min(32);
+
+    let x = area.x + (area.width.saturating_sub(popup_width)) / 2;
+    let y = area.y + (area.height.saturating_sub(popup_height)) / 2;
+    let popup_area = Rect::new(x, y, popup_width, popup_height);
+
+    frame.render_widget(Clear, popup_area);
+
+    // Entries: ("key", "description") — empty key = blank line, key without leading spaces = section header
+    let help_entries: Vec<(&str, &str)> = vec![
+        ("Navigation", ""),
+        ("  ↑ / k", "Move up"),
+        ("  ↓ / j", "Move down"),
+        ("  Enter", "Toggle detail view"),
+        ("  /", "Search"),
+        ("  Ctrl-U", "Clear search"),
+        ("", ""),
+        ("Filters", ""),
+        ("  f", "Cycle fit filter"),
+        ("  a", "Cycle availability filter"),
+        ("  T", "Cycle tensor-parallel filter"),
+        ("  P", "Provider filter"),
+        ("  U", "Use case filter"),
+        ("  C", "Capability filter"),
+        ("  L", "License filter"),
+        ("  R", "Runtime/backend filter"),
+        ("", ""),
+        ("Sorting & Display", ""),
+        ("  s", "Cycle sort column"),
+        ("  i", "Toggle installed-first sort"),
+        ("  t", "Cycle theme"),
+        ("", ""),
+        ("Actions", ""),
+        ("  d", "Download/pull model"),
+        ("  r", "Refresh installed models"),
+        ("  p", "Plan mode"),
+        ("  y", "Copy model name"),
+        ("", ""),
+        ("Comparison", ""),
+        ("  m", "Mark model for compare"),
+        ("  c", "Compare marked models"),
+        ("  x", "Clear marked models"),
+        ("  v", "Visual select mode"),
+        ("  V", "Column select mode"),
+        ("", ""),
+        ("General", ""),
+        ("  h", "This help screen"),
+        ("  q / Esc", "Quit / close popup"),
+    ];
+
+    let all_lines: Vec<Line> = help_entries
+        .iter()
+        .map(|(key, desc)| {
+            if key.is_empty() {
+                Line::from("")
+            } else if desc.is_empty() && !key.starts_with(' ') {
+                // Section header
+                Line::from(Span::styled(
+                    format!(" {}", key),
+                    Style::default()
+                        .fg(tc.accent_secondary)
+                        .add_modifier(Modifier::BOLD),
+                ))
+            } else {
+                Line::from(vec![
+                    Span::styled(
+                        format!(" {:<14}", key),
+                        Style::default()
+                            .fg(tc.fg)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(*desc, Style::default().fg(tc.muted)),
+                ])
+            }
+        })
+        .collect();
+
+    let inner_height = popup_height.saturating_sub(2) as usize;
+    let max_scroll = all_lines.len().saturating_sub(inner_height);
+    let scroll = app.help_scroll.min(max_scroll);
+
+    let visible: Vec<Line> = all_lines.into_iter().skip(scroll).take(inner_height).collect();
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(tc.accent_secondary))
+        .title(" Key Bindings ")
+        .title_style(
+            Style::default()
+                .fg(tc.accent_secondary)
+                .add_modifier(Modifier::BOLD),
+        );
+
+    let paragraph = Paragraph::new(visible).block(block);
+    frame.render_widget(paragraph, popup_area);
+}
+
+fn draw_runtime_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
+    let area = frame.area();
+
+    let max_name_len = app.runtimes.iter().map(|r| r.len()).max().unwrap_or(10);
+    let popup_width = (max_name_len as u16 + 10).min(area.width.saturating_sub(4));
+    let popup_height = (app.runtimes.len() as u16 + 2).min(area.height.saturating_sub(4));
+
+    let x = area.x + (area.width.saturating_sub(popup_width)) / 2;
+    let y = area.y + (area.height.saturating_sub(popup_height)) / 2;
+    let popup_area = Rect::new(x, y, popup_width, popup_height);
+
+    frame.render_widget(Clear, popup_area);
+
+    let inner_height = popup_height.saturating_sub(2) as usize;
+    let total = app.runtimes.len();
+
+    let scroll_offset = if app.runtime_cursor >= inner_height {
+        app.runtime_cursor - inner_height + 1
+    } else {
+        0
+    };
+
+    let lines: Vec<Line> = app
+        .runtimes
+        .iter()
+        .enumerate()
+        .skip(scroll_offset)
+        .take(inner_height)
+        .map(|(i, name)| {
+            let checkbox = if app.selected_runtimes[i] {
+                "[x]"
+            } else {
+                "[ ]"
+            };
+            let is_cursor = i == app.runtime_cursor;
+
+            let style = if is_cursor {
+                if app.selected_runtimes[i] {
+                    Style::default()
+                        .fg(tc.good)
+                        .add_modifier(Modifier::BOLD)
+                        .bg(tc.highlight_bg)
+                } else {
+                    Style::default()
+                        .fg(tc.fg)
+                        .add_modifier(Modifier::BOLD)
+                        .bg(tc.highlight_bg)
+                }
+            } else if app.selected_runtimes[i] {
+                Style::default().fg(tc.good)
+            } else {
+                Style::default().fg(tc.muted)
+            };
+
+            Line::from(Span::styled(format!(" {} {}", checkbox, name), style))
+        })
+        .collect();
+
+    let active_count = app.selected_runtimes.iter().filter(|&&s| s).count();
+    let title = format!(" Runtime ({}/{}) ", active_count, total);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(tc.accent_secondary))
+        .title(title)
+        .title_style(
+            Style::default()
+                .fg(tc.accent_secondary)
+                .add_modifier(Modifier::BOLD),
+        );
+
+    let paragraph = Paragraph::new(lines).block(block);
+    frame.render_widget(paragraph, popup_area);
 }
 
 fn draw_license_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {

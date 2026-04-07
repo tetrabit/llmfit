@@ -29,6 +29,8 @@ pub fn handle_events(app: &mut App) -> std::io::Result<bool> {
             InputMode::RunModePopup => handle_run_mode_popup_mode(app, key),
             InputMode::ParamsBucketPopup => handle_params_bucket_popup_mode(app, key),
             InputMode::LicensePopup => handle_license_popup_mode(app, key),
+            InputMode::RuntimePopup => handle_runtime_popup_mode(app, key),
+            InputMode::HelpPopup => handle_help_popup_mode(app, key),
         }
         return Ok(true);
     }
@@ -105,6 +107,8 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) {
         KeyCode::Char('C') => app.open_capability_popup(),
         KeyCode::Char('Q') => app.open_quant_popup(),
         KeyCode::Char('L') => app.open_license_popup(),
+        KeyCode::Char('R') => app.open_runtime_popup(),
+        KeyCode::Char('h') => app.open_help_popup(),
 
         // Installed-first sort toggle (any provider)
         KeyCode::Char('i')
@@ -137,9 +141,6 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) {
         {
             app.refresh_installed()
         }
-
-        // Refresh online model metadata and discover new trending models
-        KeyCode::Char('R') => app.refresh_model_catalog(),
 
         // Detail view
         KeyCode::Enter => app.toggle_detail(),
@@ -349,6 +350,36 @@ fn handle_license_popup_mode(app: &mut App, key: KeyEvent) {
 
         KeyCode::Char('a') => app.license_popup_select_all(),
 
+        _ => {}
+    }
+}
+
+fn handle_runtime_popup_mode(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('R') | KeyCode::Char('q') => app.close_runtime_popup(),
+
+        KeyCode::Up | KeyCode::Char('k') => app.runtime_popup_up(),
+        KeyCode::Down | KeyCode::Char('j') => app.runtime_popup_down(),
+
+        KeyCode::Char(' ') | KeyCode::Enter => app.runtime_popup_toggle(),
+
+        KeyCode::Char('a') => app.runtime_popup_select_all(),
+
+        _ => {}
+    }
+}
+
+fn handle_help_popup_mode(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('h') | KeyCode::Char('q') => app.close_help_popup(),
+        KeyCode::Up | KeyCode::Char('k') => {
+            if app.help_scroll > 0 {
+                app.help_scroll -= 1;
+            }
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            app.help_scroll += 1;
+        }
         _ => {}
     }
 }

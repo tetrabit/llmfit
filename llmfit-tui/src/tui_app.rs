@@ -31,6 +31,8 @@ pub enum InputMode {
     RunModePopup,
     ParamsBucketPopup,
     LicensePopup,
+    RuntimePopup,
+    HelpPopup,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -587,6 +589,14 @@ pub struct App {
     pub selected_licenses: Vec<bool>,
     pub license_cursor: usize,
 
+    // Runtime filter (popup)
+    pub runtimes: Vec<String>,
+    pub selected_runtimes: Vec<bool>,
+    pub runtime_cursor: usize,
+
+    // Help popup
+    pub help_scroll: usize,
+
     // Theme
     pub theme: Theme,
 
@@ -1000,6 +1010,14 @@ impl App {
         }
         let selected_licenses = vec![true; model_licenses.len()];
 
+        // Static runtime options — filter by compatibility, not assigned runtime
+        let model_runtimes = vec![
+            "llama.cpp".to_string(),
+            "MLX".to_string(),
+            "vLLM".to_string(),
+        ];
+        let selected_runtimes = vec![true; model_runtimes.len()];
+
         let filtered_count = all_fits.len();
 
         let (download_capability_tx, download_capability_rx) = mpsc::channel();
@@ -1106,6 +1124,10 @@ impl App {
             licenses: model_licenses,
             selected_licenses,
             license_cursor: 0,
+            runtimes: model_runtimes,
+            selected_runtimes,
+            runtime_cursor: 0,
+            help_scroll: 0,
             theme: Theme::load(),
             backend_hidden_count,
         };
@@ -1298,6 +1320,38 @@ impl App {
                     }
                 };
 
+                // Runtime filter — match by compatibility, not assigned runtime
+                let matches_runtime = {
+                    let all_selected = self.selected_runtimes.iter().all(|&s| s);
+                    if all_selected {
+                        true
+                    } else {
+                        let is_apple_silicon = self.specs.backend
+                            == llmfit_core::hardware::GpuBackend::Metal
+                            && self.specs.unified_memory;
+                        // Determine which runtimes this model is compatible with
+                        let compat_llamacpp =
+                            !fit.model.is_mlx_only() && !fit.model.is_prequantized();
+                        let compat_mlx = is_apple_silicon
+                            && (fit.model.is_mlx_model()
+                                || (!fit.model.is_prequantized()
+                                    && !fit.model.gguf_sources.is_empty()));
+                        let compat_vllm = fit.model.is_prequantized();
+                        // Check if any selected runtime matches
+                        self.runtimes
+                            .iter()
+                            .zip(self.selected_runtimes.iter())
+                            .any(|(r, &sel)| {
+                                sel && match r.as_str() {
+                                    "llama.cpp" => compat_llamacpp,
+                                    "MLX" => compat_mlx,
+                                    "vLLM" => compat_vllm,
+                                    _ => false,
+                                }
+                            })
+                    }
+                };
+
                 matches_search
                     && matches_provider
                     && matches_use_case
@@ -1311,6 +1365,7 @@ impl App {
                     && matches_tp
                     && matches_context
                     && matches_license
+                    && matches_runtime
             })
             .map(|(i, _)| i)
             .collect();
@@ -1937,7 +1992,7 @@ impl App {
     }
 
     pub fn select_column_right(&mut self) {
-        if self.select_column < 13 {
+        if self.select_column < 14 {
             self.select_column += 1;
         }
     }
@@ -1960,14 +2015,15 @@ impl App {
             7 => {
                 self.input_mode = InputMode::QuantPopup;
             } // Quant
-            8 => {
+            8 => {}                                // Disk (no filter/sort)
+            9 => {
                 self.input_mode = InputMode::RunModePopup;
             } // Mode
-            9 => self.set_or_toggle_sort(SortColumn::MemPct), // Mem%
-            10 => self.cycle_context_filter(),     // Ctx
-            11 => self.set_or_toggle_sort(SortColumn::ReleaseDate), // Date
-            12 => self.cycle_fit_filter(),         // Fit
-            13 => {
+            10 => self.set_or_toggle_sort(SortColumn::MemPct), // Mem%
+            11 => self.set_or_toggle_sort(SortColumn::Ctx), // Ctx
+            12 => self.set_or_toggle_sort(SortColumn::ReleaseDate), // Date
+            13 => self.cycle_fit_filter(),         // Fit
+            14 => {
                 self.input_mode = InputMode::UseCasePopup;
             } // Use Case
             _ => {}
@@ -2139,6 +2195,52 @@ impl App {
         }
         self.apply_filters();
         self.save_filter_state();
+    }
+
+    pub fn open_runtime_popup(&mut self) {
+        self.input_mode = InputMode::RuntimePopup;
+    }
+
+    pub fn close_runtime_popup(&mut self) {
+        self.input_mode = InputMode::Normal;
+    }
+
+    pub fn runtime_popup_up(&mut self) {
+        if self.runtime_cursor > 0 {
+            self.runtime_cursor -= 1;
+        }
+    }
+
+    pub fn runtime_popup_down(&mut self) {
+        if self.runtime_cursor + 1 < self.runtimes.len() {
+            self.runtime_cursor += 1;
+        }
+    }
+
+    pub fn runtime_popup_toggle(&mut self) {
+        if self.runtime_cursor < self.selected_runtimes.len() {
+            self.selected_runtimes[self.runtime_cursor] =
+                !self.selected_runtimes[self.runtime_cursor];
+            self.apply_filters();
+        }
+    }
+
+    pub fn runtime_popup_select_all(&mut self) {
+        let all_selected = self.selected_runtimes.iter().all(|&s| s);
+        let new_val = !all_selected;
+        for s in &mut self.selected_runtimes {
+            *s = new_val;
+        }
+        self.apply_filters();
+    }
+
+    pub fn open_help_popup(&mut self) {
+        self.help_scroll = 0;
+        self.input_mode = InputMode::HelpPopup;
+    }
+
+    pub fn close_help_popup(&mut self) {
+        self.input_mode = InputMode::Normal;
     }
 
     pub fn toggle_installed_first(&mut self) {
@@ -3343,6 +3445,10 @@ mod tests {
             params_bucket_cursor: 0,
             theme: crate::theme::Theme::Default,
             backend_hidden_count: 0,
+            runtimes: vec![],
+            selected_runtimes: vec![],
+            runtime_cursor: 0,
+            help_scroll: 0,
         }
     }
 
@@ -3367,7 +3473,7 @@ mod tests {
         let _env_lock = take_env_lock();
         let server = MockLmStudioServer::start(vec![(
             "GET /v1/models".to_string(),
-            vec![MockHttpResponse::json(200, r#"{"models":[]}"#)],
+            vec![MockHttpResponse::json(200, r#"{"data":[]}"#)],
         )]);
         let _env = EnvGuard::install(Some(&server.base_url()), None);
 
@@ -3400,10 +3506,10 @@ mod tests {
             (
                 "GET /v1/models".to_string(),
                 vec![
-                    MockHttpResponse::json(200, r#"{"models":[]}"#),
+                    MockHttpResponse::json(200, r#"{"data":[]}"#),
                     MockHttpResponse::json(
                         200,
-                        r#"{"models":[{"key":"lmstudio-community/smollm3-3b-gguf"}]}"#,
+                        r#"{"data":[{"id":"lmstudio-community/smollm3-3b-gguf"}]}"#,
                     ),
                 ],
             ),
@@ -3489,8 +3595,8 @@ mod tests {
             (
                 "GET /v1/models".to_string(),
                 vec![
-                    MockHttpResponse::json(200, r#"{"models":[]}"#),
-                    MockHttpResponse::json(200, r#"{"models":[{"key":"smollm3-3b-gguf"}]}"#),
+                    MockHttpResponse::json(200, r#"{"data":[]}"#),
+                    MockHttpResponse::json(200, r#"{"data":[{"id":"smollm3-3b-gguf"}]}"#),
                 ],
             ),
             (
@@ -3520,10 +3626,10 @@ mod tests {
             (
                 "GET /v1/models".to_string(),
                 vec![
-                    MockHttpResponse::json(200, r#"{"models":[]}"#),
+                    MockHttpResponse::json(200, r#"{"data":[]}"#),
                     MockHttpResponse::json(
                         200,
-                        r#"{"models":[{"key":"lmstudio-community/smollm3-3b-gguf"}]}"#,
+                        r#"{"data":[{"id":"lmstudio-community/smollm3-3b-gguf"}]}"#,
                     ),
                 ],
             ),
@@ -3561,7 +3667,7 @@ mod tests {
         let server = MockLmStudioServer::start(vec![
             (
                 "GET /v1/models".to_string(),
-                vec![MockHttpResponse::json(200, r#"{"models":[]}"#)],
+                vec![MockHttpResponse::json(200, r#"{"data":[]}"#)],
             ),
             (
                 "POST /api/v1/models/download".to_string(),
@@ -3623,10 +3729,10 @@ mod tests {
             (
                 "GET /v1/models".to_string(),
                 vec![
-                    MockHttpResponse::json(200, r#"{"models":[]}"#),
+                    MockHttpResponse::json(200, r#"{"data":[]}"#),
                     MockHttpResponse::json(
                         200,
-                        r#"{"models":[{"key":"lmstudio-community/smollm3-3b-gguf"}]}"#,
+                        r#"{"data":[{"id":"lmstudio-community/smollm3-3b-gguf"}]}"#,
                     ),
                 ],
             ),
@@ -3702,7 +3808,7 @@ mod tests {
         let server = MockLmStudioServer::start(vec![
             (
                 "GET /v1/models".to_string(),
-                vec![MockHttpResponse::json(200, r#"{"models":[]}"#)],
+                vec![MockHttpResponse::json(200, r#"{"data":[]}"#)],
             ),
             (
                 "POST /api/v1/models/download".to_string(),
@@ -4017,6 +4123,10 @@ mod tests {
             license_cursor: 0,
             theme: crate::theme::Theme::Default,
             backend_hidden_count: 0,
+            runtimes: vec![],
+            selected_runtimes: vec![],
+            runtime_cursor: 0,
+            help_scroll: 0,
         };
 
         let state = FilterState {
@@ -4247,6 +4357,10 @@ mod tests {
             license_cursor: 0,
             theme: crate::theme::Theme::Default,
             backend_hidden_count: 0,
+            runtimes: vec![],
+            selected_runtimes: vec![],
+            runtime_cursor: 0,
+            help_scroll: 0,
         };
 
         let fit = ModelFit {
@@ -4420,6 +4534,10 @@ mod tests {
             license_cursor: 0,
             theme: crate::theme::Theme::Default,
             backend_hidden_count: 0,
+            runtimes: vec![],
+            selected_runtimes: vec![],
+            runtime_cursor: 0,
+            help_scroll: 0,
         };
 
         let fit = ModelFit {
@@ -4591,6 +4709,10 @@ mod tests {
             license_cursor: 0,
             theme: crate::theme::Theme::Default,
             backend_hidden_count: 0,
+            runtimes: vec![],
+            selected_runtimes: vec![],
+            runtime_cursor: 0,
+            help_scroll: 0,
         };
 
         let fit = ModelFit {
