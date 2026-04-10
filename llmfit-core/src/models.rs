@@ -199,7 +199,6 @@ pub struct ModelMetadataOverlay {
     pub notes: Option<String>,
 }
 
-
 impl ModelFormat {
     /// Returns true for formats that are pre-quantized at a fixed bit width
     /// and cannot be dynamically re-quantized (AWQ, GPTQ).
@@ -365,9 +364,16 @@ fn normalized_context_length(name: &str, context_length: u32) -> u32 {
         None
     };
 
-    let family_floor = if lower.contains("llama-4") || lower.contains("llama4") || lower.contains("nemotron-3-nano-30b-a3b") {
+    let family_floor = if lower.contains("llama-4")
+        || lower.contains("llama4")
+        || lower.contains("nemotron-3-nano-30b-a3b")
+    {
         Some(1_048_576)
-    } else if lower.contains("llama-3") || lower.contains("llama3") || lower.contains("qwen3") || lower.contains("qwen2.5") {
+    } else if lower.contains("llama-3")
+        || lower.contains("llama3")
+        || lower.contains("qwen3")
+        || lower.contains("qwen2.5")
+    {
         Some(131_072)
     } else {
         None
@@ -1486,11 +1492,9 @@ mod tests {
         // Search by name substring (case insensitive)
         let results = db.find_model("llama");
         assert!(!results.is_empty());
-        assert!(
-            results
-                .iter()
-                .any(|m| m.name.to_lowercase().contains("llama"))
-        );
+        assert!(results
+            .iter()
+            .any(|m| m.name.to_lowercase().contains("llama")));
 
         // Search should be case insensitive
         let results_upper = db.find_model("LLAMA");

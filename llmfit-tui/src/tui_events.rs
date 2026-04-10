@@ -31,6 +31,7 @@ pub fn handle_events(app: &mut App) -> std::io::Result<bool> {
             InputMode::LicensePopup => handle_license_popup_mode(app, key),
             InputMode::RuntimePopup => handle_runtime_popup_mode(app, key),
             InputMode::HelpPopup => handle_help_popup_mode(app, key),
+            InputMode::Simulation => handle_simulation_mode(app, key),
         }
         return Ok(true);
     }
@@ -108,6 +109,7 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) {
         KeyCode::Char('Q') => app.open_quant_popup(),
         KeyCode::Char('L') => app.open_license_popup(),
         KeyCode::Char('R') => app.open_runtime_popup(),
+        KeyCode::Char('S') => app.open_simulation_popup(),
         KeyCode::Char('h') => app.open_help_popup(),
 
         // Installed-first sort toggle (any provider)
@@ -380,6 +382,41 @@ fn handle_help_popup_mode(app: &mut App, key: KeyEvent) {
         KeyCode::Down | KeyCode::Char('j') => {
             app.help_scroll += 1;
         }
+        _ => {}
+    }
+}
+
+fn handle_simulation_mode(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => app.close_simulation_popup(),
+
+        // Apply simulation
+        KeyCode::Enter => app.apply_simulation(),
+
+        // Reset to real hardware
+        KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.reset_simulation();
+            app.close_simulation_popup();
+        }
+
+        // Field navigation
+        KeyCode::Tab | KeyCode::Down | KeyCode::Char('j') => app.sim_next_field(),
+        KeyCode::BackTab | KeyCode::Up | KeyCode::Char('k') => app.sim_prev_field(),
+
+        // Cursor movement within field
+        KeyCode::Left => app.sim_cursor_left(),
+        KeyCode::Right => app.sim_cursor_right(),
+
+        // Editing
+        KeyCode::Backspace => app.sim_backspace(),
+        KeyCode::Delete => app.sim_delete(),
+        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.sim_clear_field()
+        }
+
+        // Character input (digits and decimal point)
+        KeyCode::Char(c) if c.is_ascii_digit() || c == '.' => app.sim_input(c),
+
         _ => {}
     }
 }

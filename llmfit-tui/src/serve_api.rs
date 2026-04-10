@@ -125,7 +125,7 @@ type ApiResult<T> = Result<T, ApiError>;
 pub fn run_serve(
     host: &str,
     port: u16,
-    memory_override: &Option<String>,
+    overrides: &super::HardwareOverrides,
     context_limit: Option<u32>,
 ) -> Result<(), String> {
     let ip: IpAddr = host
@@ -133,7 +133,7 @@ pub fn run_serve(
         .map_err(|_| format!("invalid --host value: '{host}'"))?;
     let addr = SocketAddr::new(ip, port);
 
-    let specs = detect_specs(memory_override);
+    let specs = super::detect_specs(overrides);
     let db = ModelDatabase::new();
     let all_models = db.get_all_models().clone();
 
@@ -974,19 +974,6 @@ fn round1(v: f64) -> f64 {
 
 fn round2(v: f64) -> f64 {
     (v * 100.0).round() / 100.0
-}
-
-/// Detect system specs with optional GPU memory override.
-fn detect_specs(memory_override: &Option<String>) -> SystemSpecs {
-    let specs = SystemSpecs::detect();
-    if let Some(mem_str) = memory_override {
-        match llmfit_core::hardware::parse_memory_size(mem_str) {
-            Some(gb) => specs.with_gpu_memory_override(gb),
-            None => specs,
-        }
-    } else {
-        specs
-    }
 }
 
 #[cfg(test)]

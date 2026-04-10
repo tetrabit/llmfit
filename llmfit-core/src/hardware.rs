@@ -1473,6 +1473,31 @@ impl SystemSpecs {
         self
     }
 
+    /// Override total and available system RAM with a user-specified value (in GB).
+    /// Sets available RAM to 90% of the override to model typical system usage.
+    /// On unified-memory systems (Apple Silicon), this also updates GPU VRAM
+    /// to stay consistent — use `--memory` after `--ram` to override VRAM separately.
+    pub fn with_ram_override(mut self, ram_gb: f64) -> Self {
+        self.total_ram_gb = ram_gb;
+        self.available_ram_gb = ram_gb * 0.9;
+        if self.unified_memory {
+            self.gpu_vram_gb = Some(ram_gb);
+            self.total_gpu_vram_gb = Some(ram_gb);
+            for gpu in &mut self.gpus {
+                if gpu.unified_memory {
+                    gpu.vram_gb = Some(ram_gb);
+                }
+            }
+        }
+        self
+    }
+
+    /// Override the detected CPU core count with a user-specified value.
+    pub fn with_cpu_core_override(mut self, cores: usize) -> Self {
+        self.total_cpu_cores = cores;
+        self
+    }
+
     pub fn display(&self) {
         println!("\n=== System Specifications ===");
         println!("CPU: {} ({} cores)", self.cpu_name, self.total_cpu_cores);
@@ -3000,5 +3025,97 @@ GPU id = 1 (NVIDIA GeForce RTX 4090)
         // GGUF quants have no CC restriction
         assert_eq!(super::quant_min_compute_capability("Q4_K_M"), None);
         assert_eq!(super::quant_min_compute_capability("Q8_0"), None);
+    }
+
+    #[test]
+    fn test_ram_override_updates_ram_values() {
+        let specs = SystemSpecs {
+            total_ram_gb: 32.0,
+            available_ram_gb: 24.0,
+            total_cpu_cores: 8,
+            cpu_name: "Test CPU".to_string(),
+            has_gpu: true,
+            gpu_vram_gb: Some(16.0),
+            total_gpu_vram_gb: Some(16.0),
+            gpu_name: Some("Test GPU".to_string()),
+            gpu_count: 1,
+            unified_memory: false,
+            backend: super::GpuBackend::Cuda,
+            gpus: vec![super::GpuInfo {
+                name: "Test GPU".to_string(),
+                vram_gb: Some(16.0),
+                backend: super::GpuBackend::Cuda,
+                count: 1,
+                unified_memory: false,
+            }],
+            cluster_mode: false,
+            cluster_node_count: 0,
+        };
+
+        let overridden = specs.with_ram_override(128.0);
+        assert_eq!(overridden.total_ram_gb, 128.0);
+        assert!((overridden.available_ram_gb - 115.2).abs() < 0.01);
+        // Discrete GPU VRAM unchanged
+        assert_eq!(overridden.gpu_vram_gb, Some(16.0));
+        assert_eq!(overridden.total_gpu_vram_gb, Some(16.0));
+    }
+
+    #[test]
+    fn test_ram_override_unified_memory_updates_gpu() {
+        let specs = SystemSpecs {
+            total_ram_gb: 36.0,
+            available_ram_gb: 30.0,
+            total_cpu_cores: 10,
+            cpu_name: "Apple M2 Max".to_string(),
+            has_gpu: true,
+            gpu_vram_gb: Some(36.0),
+            total_gpu_vram_gb: Some(36.0),
+            gpu_name: Some("Apple M2 Max".to_string()),
+            gpu_count: 1,
+            unified_memory: true,
+            backend: super::GpuBackend::Metal,
+            gpus: vec![super::GpuInfo {
+                name: "Apple M2 Max".to_string(),
+                vram_gb: Some(36.0),
+                backend: super::GpuBackend::Metal,
+                count: 1,
+                unified_memory: true,
+            }],
+            cluster_mode: false,
+            cluster_node_count: 0,
+        };
+
+        let overridden = specs.with_ram_override(96.0);
+        assert_eq!(overridden.total_ram_gb, 96.0);
+        assert_eq!(overridden.gpu_vram_gb, Some(96.0));
+        assert_eq!(overridden.total_gpu_vram_gb, Some(96.0));
+        assert_eq!(overridden.gpus[0].vram_gb, Some(96.0));
+    }
+
+    #[test]
+    fn test_cpu_core_override() {
+        let specs = SystemSpecs {
+            total_ram_gb: 32.0,
+            available_ram_gb: 24.0,
+            total_cpu_cores: 8,
+            cpu_name: "Test CPU".to_string(),
+            has_gpu: false,
+            gpu_vram_gb: None,
+            total_gpu_vram_gb: None,
+            gpu_name: None,
+            gpu_count: 0,
+            unified_memory: false,
+            backend: super::GpuBackend::CpuX86,
+            gpus: vec![],
+            cluster_mode: false,
+            cluster_node_count: 0,
+        };
+
+        let overridden = specs.with_cpu_core_override(64);
+        assert_eq!(overridden.total_cpu_cores, 64);
+        // Other fields unchanged
+        assert_eq!(overridden.total_ram_gb, 32.0);
+        assert_eq!(overridden.available_ram_gb, 24.0);
+        assert!(!overridden.has_gpu);
     }
 }

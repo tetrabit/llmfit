@@ -21,6 +21,8 @@ A terminal tool that right-sizes LLM models to your system's RAM, CPU, and GPU. 
 
 Ships with an interactive TUI (default) and a classic CLI mode. Supports multi-GPU setups, MoE architectures, dynamic quantization selection, speed estimation, and local runtime providers (Ollama, llama.cpp, MLX, Docker Model Runner, LM Studio).
 
+**New: [Hardware Simulation](#hardware-simulation-s)** — Press `S` in the TUI to simulate different hardware. Override RAM, VRAM, and CPU cores to instantly see which models would fit on target hardware without leaving the app.
+
 > **Sister projects:**
 > - [sympozium](https://github.com/sympozium-ai/sympozium/) — managing agents in Kubernetes.
 > - [llmserve](https://github.com/AlexsJones/llmserve) — a simple TUI for serving local LLM models. Pick a model, pick a backend, serve it.
@@ -109,6 +111,7 @@ Launches the interactive terminal UI. Your system specs (CPU, RAM, GPU name, VRA
 | `C`                        | Open capability filter popup                                          |
 | `L`                        | Open license filter popup                                             |
 | `R`                        | Open runtime/backend filter popup (llama.cpp, MLX, vLLM)             |
+| `S`                        | Open hardware simulation popup (override RAM/VRAM/CPU)                |
 | `h`                        | Open help popup (all key bindings)                                    |
 | `m`                        | Mark selected model for compare                                       |
 | `c`                        | Open compare view (marked vs selected)                                |
@@ -179,6 +182,22 @@ Plan mode shows estimates for:
 - minimum and recommended VRAM/RAM/CPU cores
 - feasible run paths (GPU, CPU offload, CPU-only)
 - upgrade deltas to reach better fit targets
+
+### Hardware Simulation (`S`)
+
+Press `S` to open the hardware simulation popup. Override RAM, VRAM, and CPU core count to see which models would fit on different target hardware. All model scores, fit levels, and speed estimates are recalculated instantly against the simulated specs.
+
+![Hardware Simulation](simulation.png)
+
+| Key                    | Action                                  |
+|------------------------|-----------------------------------------|
+| `Tab` / `j` / `k`      | Switch between RAM, VRAM, CPU fields    |
+| Type digits            | Edit the selected field                 |
+| `Enter`               | Apply simulation                        |
+| `Ctrl-R`              | Reset to real detected hardware         |
+| `Esc`                 | Cancel and close                        |
+
+When simulation is active, a `SIM` badge appears in the system bar and status bar. The entire model table reflects the simulated hardware until you reset.
 
 ### Themes
 
@@ -309,26 +328,31 @@ python3 scripts/test_api.py --spawn
 python3 scripts/test_api.py --base-url http://127.0.0.1:8787
 ```
 
-### GPU memory override
+### Hardware overrides
 
-GPU VRAM autodetection can fail on some systems (e.g. broken `nvidia-smi`, VMs, passthrough setups). Use `--memory` to manually specify your GPU's VRAM:
+Hardware autodetection can fail on some systems (e.g. broken `nvidia-smi`, VMs, passthrough setups), or you may want to evaluate model fit against different target hardware. Use `--memory`, `--ram`, and `--cpu-cores` to override detected values:
 
 ```sh
-# Override with 32 GB VRAM
+# Override GPU VRAM
 llmfit --memory=32G
 
-# Megabytes also work (32000 MB ≈ 31.25 GB)
-llmfit --memory=32000M
+# Override system RAM
+llmfit --ram=128G
+
+# Override CPU core count
+llmfit --cpu-cores=16
+
+# Combine overrides to simulate target hardware
+llmfit --memory=24G --ram=64G --cpu-cores=8 fit
+llmfit --memory=24G --ram=64G system --json
 
 # Works with all modes: TUI, CLI, and subcommands
 llmfit --memory=24G --cli
 llmfit --memory=24G fit --perfect -n 5
-llmfit --memory=24G system
-llmfit --memory=24G info "Llama-3.1-70B"
-llmfit --memory=24G recommend --json
+llmfit --ram=64G recommend --json
 ```
 
-Accepted suffixes: `G`/`GB`/`GiB` (gigabytes), `M`/`MB`/`MiB` (megabytes), `T`/`TB`/`TiB` (terabytes). Case-insensitive. If no GPU was detected, the override creates a synthetic GPU entry so models are scored for GPU inference.
+Accepted suffixes for `--memory` and `--ram`: `G`/`GB`/`GiB` (gigabytes), `M`/`MB`/`MiB` (megabytes), `T`/`TB`/`TiB` (terabytes). Case-insensitive. If no GPU was detected, `--memory` creates a synthetic GPU entry so models are scored for GPU inference. On unified-memory systems (Apple Silicon), `--ram` also updates VRAM; use `--memory` to override VRAM independently.
 
 ### Context-length cap for estimation
 
@@ -690,7 +714,7 @@ llmfit's database uses HuggingFace model names (e.g. `Qwen/Qwen2.5-Coder-14B-Ins
 | Apple Silicon          | `system_profiler`             | Unified memory (= system RAM)  |
 | Ascend                 | `npu-smi`                     | Detected (VRAM may be unknown) |
 
-If autodetection fails or reports incorrect values, use `--memory=<SIZE>` to override (see [GPU memory override](#gpu-memory-override) above).
+If autodetection fails or reports incorrect values, use `--memory`, `--ram`, or `--cpu-cores` to override (see [Hardware overrides](#hardware-overrides) above).
 
 ### Android / Termux note
 

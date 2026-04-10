@@ -1,9 +1,9 @@
 use colored::*;
 use llmfit_core::fit::{FitLevel, InferenceRuntime, ModelFit, RunMode, SortColumn};
 use llmfit_core::hardware::SystemSpecs;
-use llmfit_core::models::{LlmModel, format_context_length};
+use llmfit_core::models::{format_context_length, LlmModel};
 use llmfit_core::plan::PlanEstimate;
-use tabled::{Table, Tabled, settings::Style};
+use tabled::{settings::Style, Table, Tabled};
 
 #[derive(Tabled)]
 struct ModelRow {
@@ -116,12 +116,7 @@ pub fn display_model_fits(fits: &[ModelFit]) {
         .iter()
         .map(|fit| {
             let status_prefix = if fit.installed { "✓ " } else { "" };
-            let status_text = format!(
-                "{}{} {}",
-                status_prefix,
-                fit.fit_emoji(),
-                fit.fit_text()
-            );
+            let status_text = format!("{}{} {}", status_prefix, fit.fit_emoji(), fit.fit_text());
 
             ModelRow {
                 status: status_text,

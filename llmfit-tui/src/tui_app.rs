@@ -33,6 +33,32 @@ pub enum InputMode {
     LicensePopup,
     RuntimePopup,
     HelpPopup,
+    Simulation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SimulationField {
+    Ram,
+    Vram,
+    CpuCores,
+}
+
+impl SimulationField {
+    pub fn next(self) -> Self {
+        match self {
+            SimulationField::Ram => SimulationField::Vram,
+            SimulationField::Vram => SimulationField::CpuCores,
+            SimulationField::CpuCores => SimulationField::Ram,
+        }
+    }
+
+    pub fn prev(self) -> Self {
+        match self {
+            SimulationField::Ram => SimulationField::CpuCores,
+            SimulationField::Vram => SimulationField::Ram,
+            SimulationField::CpuCores => SimulationField::Vram,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -597,6 +623,16 @@ pub struct App {
     // Help popup
     pub help_scroll: usize,
 
+    // Hardware simulation
+    pub real_specs: SystemSpecs,
+    pub sim_active: bool,
+    pub sim_field: SimulationField,
+    pub sim_ram_input: String,
+    pub sim_vram_input: String,
+    pub sim_cpu_input: String,
+    pub sim_cursor_position: usize,
+    context_limit: Option<u32>,
+
     // Theme
     pub theme: Theme,
 
@@ -873,6 +909,7 @@ impl App {
     }
 
     pub fn with_specs_and_context(specs: SystemSpecs, context_limit: Option<u32>) -> Self {
+        let real_specs = specs.clone();
         let db = ModelDatabase::new();
 
         // Detect Ollama
@@ -1128,6 +1165,14 @@ impl App {
             selected_runtimes,
             runtime_cursor: 0,
             help_scroll: 0,
+            real_specs,
+            sim_active: false,
+            sim_field: SimulationField::Ram,
+            sim_ram_input: String::new(),
+            sim_vram_input: String::new(),
+            sim_cpu_input: String::new(),
+            sim_cursor_position: 0,
+            context_limit,
             theme: Theme::load(),
             backend_hidden_count,
         };
@@ -2241,6 +2286,126 @@ impl App {
 
     pub fn close_help_popup(&mut self) {
         self.input_mode = InputMode::Normal;
+    }
+
+    // ── Hardware simulation ──────────────────────────────────────────
+
+    pub fn open_simulation_popup(&mut self) {
+        self.sim_ram_input = format!("{:.1}", self.specs.total_ram_gb);
+        self.sim_vram_input = format!("{:.1}", self.specs.gpu_vram_gb.unwrap_or(0.0));
+        self.sim_cpu_input = format!("{}", self.specs.total_cpu_cores);
+        self.sim_field = SimulationField::Ram;
+        self.sim_cursor_position = self.sim_ram_input.len();
+        self.input_mode = InputMode::Simulation;
+    }
+
+    pub fn close_simulation_popup(&mut self) {
+        self.input_mode = InputMode::Normal;
+    }
+
+    pub fn apply_simulation(&mut self) {
+        let ram: f64 = self
+            .sim_ram_input
+            .parse()
+            .unwrap_or(self.real_specs.total_ram_gb);
+        let vram: f64 = self
+            .sim_vram_input
+            .parse()
+            .unwrap_or(self.real_specs.gpu_vram_gb.unwrap_or(0.0));
+        let cores: usize = self
+            .sim_cpu_input
+            .parse()
+            .unwrap_or(self.real_specs.total_cpu_cores);
+
+        // Start from real specs, apply overrides (RAM first, then VRAM so it wins on unified)
+        let mut specs = self.real_specs.clone();
+        specs = specs.with_ram_override(ram);
+        specs = specs.with_gpu_memory_override(vram);
+        specs = specs.with_cpu_core_override(cores);
+
+        self.specs = specs;
+        self.sim_active = true;
+        self.rebuild_fits();
+        self.input_mode = InputMode::Normal;
+    }
+
+    pub fn reset_simulation(&mut self) {
+        self.specs = self.real_specs.clone();
+        self.sim_active = false;
+        self.rebuild_fits();
+    }
+
+    fn active_sim_input(&self) -> &str {
+        match self.sim_field {
+            SimulationField::Ram => &self.sim_ram_input,
+            SimulationField::Vram => &self.sim_vram_input,
+            SimulationField::CpuCores => &self.sim_cpu_input,
+        }
+    }
+
+    fn active_sim_input_mut(&mut self) -> &mut String {
+        match self.sim_field {
+            SimulationField::Ram => &mut self.sim_ram_input,
+            SimulationField::Vram => &mut self.sim_vram_input,
+            SimulationField::CpuCores => &mut self.sim_cpu_input,
+        }
+    }
+
+    pub fn sim_next_field(&mut self) {
+        self.sim_field = self.sim_field.next();
+        self.sim_cursor_position = self.active_sim_input().len();
+    }
+
+    pub fn sim_prev_field(&mut self) {
+        self.sim_field = self.sim_field.prev();
+        self.sim_cursor_position = self.active_sim_input().len();
+    }
+
+    pub fn sim_input(&mut self, c: char) {
+        // Only allow digits and '.' for RAM/VRAM, only digits for CPU
+        let allow = match self.sim_field {
+            SimulationField::Ram | SimulationField::Vram => c.is_ascii_digit() || c == '.',
+            SimulationField::CpuCores => c.is_ascii_digit(),
+        };
+        if !allow {
+            return;
+        }
+        let pos = self.sim_cursor_position;
+        self.active_sim_input_mut().insert(pos, c);
+        self.sim_cursor_position += 1;
+    }
+
+    pub fn sim_backspace(&mut self) {
+        if self.sim_cursor_position > 0 {
+            self.sim_cursor_position -= 1;
+            let pos = self.sim_cursor_position;
+            self.active_sim_input_mut().remove(pos);
+        }
+    }
+
+    pub fn sim_delete(&mut self) {
+        let len = self.active_sim_input().len();
+        if self.sim_cursor_position < len {
+            let pos = self.sim_cursor_position;
+            self.active_sim_input_mut().remove(pos);
+        }
+    }
+
+    pub fn sim_clear_field(&mut self) {
+        self.active_sim_input_mut().clear();
+        self.sim_cursor_position = 0;
+    }
+
+    pub fn sim_cursor_left(&mut self) {
+        if self.sim_cursor_position > 0 {
+            self.sim_cursor_position -= 1;
+        }
+    }
+
+    pub fn sim_cursor_right(&mut self) {
+        if self.sim_cursor_position < self.active_sim_input().len() {
+            self.sim_cursor_position += 1;
+        }
     }
 
     pub fn toggle_installed_first(&mut self) {
@@ -3449,6 +3614,14 @@ mod tests {
             selected_runtimes: vec![],
             runtime_cursor: 0,
             help_scroll: 0,
+            real_specs: test_specs(),
+            sim_active: false,
+            sim_field: super::SimulationField::Ram,
+            sim_ram_input: String::new(),
+            sim_vram_input: String::new(),
+            sim_cpu_input: String::new(),
+            sim_cursor_position: 0,
+            context_limit: None,
         }
     }
 
@@ -4127,6 +4300,14 @@ mod tests {
             selected_runtimes: vec![],
             runtime_cursor: 0,
             help_scroll: 0,
+            real_specs: test_specs(),
+            sim_active: false,
+            sim_field: super::SimulationField::Ram,
+            sim_ram_input: String::new(),
+            sim_vram_input: String::new(),
+            sim_cpu_input: String::new(),
+            sim_cursor_position: 0,
+            context_limit: None,
         };
 
         let state = FilterState {
@@ -4361,6 +4542,14 @@ mod tests {
             selected_runtimes: vec![],
             runtime_cursor: 0,
             help_scroll: 0,
+            real_specs: test_specs(),
+            sim_active: false,
+            sim_field: super::SimulationField::Ram,
+            sim_ram_input: String::new(),
+            sim_vram_input: String::new(),
+            sim_cpu_input: String::new(),
+            sim_cursor_position: 0,
+            context_limit: None,
         };
 
         let fit = ModelFit {
@@ -4538,6 +4727,14 @@ mod tests {
             selected_runtimes: vec![],
             runtime_cursor: 0,
             help_scroll: 0,
+            real_specs: test_specs(),
+            sim_active: false,
+            sim_field: super::SimulationField::Ram,
+            sim_ram_input: String::new(),
+            sim_vram_input: String::new(),
+            sim_cpu_input: String::new(),
+            sim_cursor_position: 0,
+            context_limit: None,
         };
 
         let fit = ModelFit {
@@ -4713,6 +4910,14 @@ mod tests {
             selected_runtimes: vec![],
             runtime_cursor: 0,
             help_scroll: 0,
+            real_specs: test_specs(),
+            sim_active: false,
+            sim_field: super::SimulationField::Ram,
+            sim_ram_input: String::new(),
+            sim_vram_input: String::new(),
+            sim_cpu_input: String::new(),
+            sim_cursor_position: 0,
+            context_limit: None,
         };
 
         let fit = ModelFit {
