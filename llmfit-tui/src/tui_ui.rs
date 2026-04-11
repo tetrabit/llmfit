@@ -35,7 +35,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
             Constraint::Length(4), // system info bar (2 rows)
             Constraint::Length(3), // search + filters
             Constraint::Min(10),   // main table
-            Constraint::Length(2), // status bar (model name + keybindings)
+            Constraint::Length(3), // status bar (model name + keybindings)
         ])
         .split(frame.area());
 
@@ -2291,6 +2291,14 @@ fn draw_popup_frame(frame: &mut Frame, content_width: u16, item_count: usize) ->
 /// `items` and `selected` must have the same length. `cursor` is the
 /// highlighted row index.  Optional `bottom_bar` renders a footer line
 /// (e.g. "a: all | c: clear").
+/// Generic popup helper: draws a centered, scrollable list (checkbox or single-select).
+///
+/// `items` and `selected` must have the same length. `cursor` is the
+/// highlighted row index. Optional `bottom_bar` renders a footer line
+/// (e.g. "a: all | c: clear").
+///
+/// When `use_single_select=true`, renders with ">" cursor (like download_provider).
+/// When `use_single_select=false`, renders with "[x]/[ ]" checkboxes (standard).
 fn draw_checkbox_popup<'a>(
     frame: &mut Frame,
     items: &[&str],
@@ -2299,6 +2307,7 @@ fn draw_checkbox_popup<'a>(
     title_prefix: &str,
     tc: &ThemeColors,
     bottom_bar: Option<Line<'a>>,
+    use_single_select: bool,
 ) {
     let max_name_len = items.iter().map(|s| s.len()).max().unwrap_or(10);
     let (popup_area, inner_height) = draw_popup_frame(frame, max_name_len as u16 + 10, items.len());
@@ -2317,28 +2326,42 @@ fn draw_checkbox_popup<'a>(
         .skip(scroll_offset)
         .take(inner_height)
         .map(|(i, (name, &is_selected))| {
-            let checkbox = if is_selected { "[x]" } else { "[ ]" };
             let is_cursor = i == cursor;
 
-            let style = if is_cursor {
-                if is_selected {
+            if use_single_select {
+                // Single-select mode: ">" cursor, accent color when highlighted
+                let prefix = if is_cursor { ">" } else { " " };
+                let style = if is_cursor {
                     Style::default()
-                        .fg(tc.good)
+                        .fg(tc.accent_secondary)
                         .add_modifier(Modifier::BOLD)
                         .bg(tc.highlight_bg)
                 } else {
-                    Style::default()
-                        .fg(tc.fg)
-                        .add_modifier(Modifier::BOLD)
-                        .bg(tc.highlight_bg)
-                }
-            } else if is_selected {
-                Style::default().fg(tc.good)
+                    Style::default().fg(tc.fg)
+                };
+                Line::from(Span::styled(format!(" {} {}", prefix, name), style))
             } else {
-                Style::default().fg(tc.muted)
-            };
-
-            Line::from(Span::styled(format!(" {} {}", checkbox, name), style))
+                // Multi-select mode: "[x]/[ ]" checkbox with conditional coloring
+                let checkbox = if is_selected { "[x]" } else { "[ ]" };
+                let style = if is_cursor {
+                    if is_selected {
+                        Style::default()
+                            .fg(tc.good)
+                            .add_modifier(Modifier::BOLD)
+                            .bg(tc.highlight_bg)
+                    } else {
+                        Style::default()
+                            .fg(tc.fg)
+                            .add_modifier(Modifier::BOLD)
+                            .bg(tc.highlight_bg)
+                    }
+                } else if is_selected {
+                    Style::default().fg(tc.good)
+                } else {
+                    Style::default().fg(tc.muted)
+                };
+                Line::from(Span::styled(format!(" {} {}", checkbox, name), style))
+            }
         })
         .collect();
 
@@ -2361,6 +2384,7 @@ fn draw_checkbox_popup<'a>(
     let paragraph = Paragraph::new(lines).block(block);
     frame.render_widget(paragraph, popup_area);
 }
+
 
 fn draw_provider_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
     let labels: Vec<&str> = app.providers.iter().map(|s| s.as_str()).collect();
@@ -2389,6 +2413,7 @@ fn draw_provider_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
         "Providers",
         tc,
         Some(bottom),
+        false,
     );
 }
 
@@ -2407,6 +2432,7 @@ fn draw_use_case_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
         "Use Cases",
         tc,
         None,
+        false,
     );
 }
 
@@ -2425,65 +2451,39 @@ fn draw_capability_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
         "Capabilities",
         tc,
         None,
+        false,
     );
 }
 
 fn draw_download_provider_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
-    let area = frame.area();
-    let popup_width = 44.min(area.width.saturating_sub(4));
-    let popup_height = 8.min(area.height.saturating_sub(4));
-
-    let x = area.x + (area.width.saturating_sub(popup_width)) / 2;
-    let y = area.y + (area.height.saturating_sub(popup_height)) / 2;
-    let popup_area = Rect::new(x, y, popup_width, popup_height);
-
-    frame.render_widget(Clear, popup_area);
-
-    let mut lines = Vec::new();
-    if let Some(name) = &app.download_provider_model {
-        lines.push(Line::from(Span::styled(
-            format!(" Model: {}", name),
-            Style::default().fg(tc.muted),
-        )));
-        lines.push(Line::from(""));
-    }
-
-    for (i, provider) in app.download_provider_options.iter().enumerate() {
-        let label = match provider {
+    let labels: Vec<&str> = app
+        .download_provider_options
+        .iter()
+        .map(|provider| match provider {
             DownloadProvider::Ollama => "Ollama",
             DownloadProvider::Mlx => "MLX",
             DownloadProvider::LlamaCpp => "llama.cpp",
             DownloadProvider::DockerModelRunner => "Docker Model Runner",
             DownloadProvider::LmStudio => "LM Studio",
-        };
-        let is_cursor = i == app.download_provider_cursor;
-        let prefix = if is_cursor { ">" } else { " " };
-        let style = if is_cursor {
-            Style::default()
-                .fg(tc.accent_secondary)
-                .add_modifier(Modifier::BOLD)
-                .bg(tc.highlight_bg)
-        } else {
-            Style::default().fg(tc.fg)
-        };
-        lines.push(Line::from(Span::styled(
-            format!(" {} {}", prefix, label),
-            style,
-        )));
+        })
+        .collect();
+    
+    // For single-select, only one item is "selected"
+    let mut selected = vec![false; labels.len()];
+    if app.download_provider_cursor < selected.len() {
+        selected[app.download_provider_cursor] = true;
     }
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(tc.accent_secondary))
-        .title(" Download With ")
-        .title_style(
-            Style::default()
-                .fg(tc.accent_secondary)
-                .add_modifier(Modifier::BOLD),
-        );
-
-    let paragraph = Paragraph::new(lines).block(block);
-    frame.render_widget(paragraph, popup_area);
+    
+    draw_checkbox_popup(
+        frame,
+        &labels,
+        &selected,
+        app.download_provider_cursor,
+        "Download With",
+        tc,
+        None,
+        true,
+    );
 }
 
 fn status_keys_and_mode(app: &App) -> (Vec<String>, String) {
@@ -2521,7 +2521,7 @@ fn status_keys_and_mode(app: &App) -> (Vec<String>, String) {
             (
                 vec![
                     format!(
-                        " ↑↓/jk:nav  {}  /:search  f:fit  w:runtime  K:ctx  s:sort  Ctrl-R:reset  v:visual  V:select  t:theme  S:simulate  R:runtime  h:help",
+                        " ↑↓/jk:nav  {}  /:search  f:fit  w:runtime  K:ctx  s:sort  Ctrl-R:reset  v:visual  V:select  t:theme  S:simulate  h:help",
                         detail_key,
                     ),
                     format!(
@@ -2620,12 +2620,30 @@ fn status_keys_and_mode(app: &App) -> (Vec<String>, String) {
 
 fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
     let (keys, mode_text) = status_keys_and_mode(app);
-    let keys_joined = keys.join(" ");
+
+    let mut status_lines = Vec::new();
+    for (i, key_line) in keys.iter().enumerate() {
+        if i == 0 {
+            status_lines.push(Line::from(vec![
+                Span::styled(
+                    format!(" {} ", mode_text),
+                    Style::default().fg(tc.status_fg).bg(tc.status_bg).bold(),
+                ),
+                Span::styled(key_line.clone(), Style::default().fg(tc.muted)),
+            ]));
+        } else {
+            let padding = " ".repeat(mode_text.len() + 2);
+            status_lines.push(Line::from(vec![
+                Span::styled(padding, Style::default()),
+                Span::styled(key_line.clone(), Style::default().fg(tc.muted)),
+            ]));
+        }
+    }
 
     // Split into 2 rows: selected model name + keybindings
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Length(1)])
+        .constraints([Constraint::Length(1), Constraint::Min(1)])
         .split(area);
 
     // Row 0: selected model full name
@@ -2677,14 +2695,7 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
             ])
             .split(rows[1]);
 
-        let status_line = Line::from(vec![
-            Span::styled(
-                format!(" {} ", mode_text),
-                Style::default().fg(tc.status_fg).bg(tc.status_bg).bold(),
-            ),
-            Span::styled(keys_joined.clone(), Style::default().fg(tc.muted)),
-        ]);
-        frame.render_widget(Paragraph::new(status_line), chunks[0]);
+        frame.render_widget(Paragraph::new(status_lines), chunks[0]);
 
         let pull_color = if app.pull_active.is_some() {
             tc.warning
@@ -2701,15 +2712,7 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
         return;
     }
 
-    let status_line = Line::from(vec![
-        Span::styled(
-            format!(" {} ", mode_text),
-            Style::default().fg(tc.status_fg).bg(tc.status_bg).bold(),
-        ),
-        Span::styled(keys_joined, Style::default().fg(tc.muted)),
-    ]);
-
-    frame.render_widget(Paragraph::new(status_line), rows[1]);
+    frame.render_widget(Paragraph::new(status_lines), rows[1]);
 }
 
 fn draw_quant_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
@@ -2722,6 +2725,7 @@ fn draw_quant_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
         "Quant",
         tc,
         None,
+        false,
     );
 }
 
@@ -2735,6 +2739,7 @@ fn draw_run_mode_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
         "Run Mode",
         tc,
         None,
+        false,
     );
 }
 
@@ -2748,6 +2753,7 @@ fn draw_params_bucket_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
         "Params",
         tc,
         None,
+        false,
     );
 }
 
@@ -2856,78 +2862,17 @@ fn draw_help_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
 }
 
 fn draw_runtime_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
-    let area = frame.area();
-
-    let max_name_len = app.runtimes.iter().map(|r| r.len()).max().unwrap_or(10);
-    let popup_width = (max_name_len as u16 + 10).min(area.width.saturating_sub(4));
-    let popup_height = (app.runtimes.len() as u16 + 2).min(area.height.saturating_sub(4));
-
-    let x = area.x + (area.width.saturating_sub(popup_width)) / 2;
-    let y = area.y + (area.height.saturating_sub(popup_height)) / 2;
-    let popup_area = Rect::new(x, y, popup_width, popup_height);
-
-    frame.render_widget(Clear, popup_area);
-
-    let inner_height = popup_height.saturating_sub(2) as usize;
-    let total = app.runtimes.len();
-
-    let scroll_offset = if app.runtime_cursor >= inner_height {
-        app.runtime_cursor - inner_height + 1
-    } else {
-        0
-    };
-
-    let lines: Vec<Line> = app
-        .runtimes
-        .iter()
-        .enumerate()
-        .skip(scroll_offset)
-        .take(inner_height)
-        .map(|(i, name)| {
-            let checkbox = if app.selected_runtimes[i] {
-                "[x]"
-            } else {
-                "[ ]"
-            };
-            let is_cursor = i == app.runtime_cursor;
-
-            let style = if is_cursor {
-                if app.selected_runtimes[i] {
-                    Style::default()
-                        .fg(tc.good)
-                        .add_modifier(Modifier::BOLD)
-                        .bg(tc.highlight_bg)
-                } else {
-                    Style::default()
-                        .fg(tc.fg)
-                        .add_modifier(Modifier::BOLD)
-                        .bg(tc.highlight_bg)
-                }
-            } else if app.selected_runtimes[i] {
-                Style::default().fg(tc.good)
-            } else {
-                Style::default().fg(tc.muted)
-            };
-
-            Line::from(Span::styled(format!(" {} {}", checkbox, name), style))
-        })
-        .collect();
-
-    let active_count = app.selected_runtimes.iter().filter(|&&s| s).count();
-    let title = format!(" Runtime ({}/{}) ", active_count, total);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(tc.accent_secondary))
-        .title(title)
-        .title_style(
-            Style::default()
-                .fg(tc.accent_secondary)
-                .add_modifier(Modifier::BOLD),
-        );
-
-    let paragraph = Paragraph::new(lines).block(block);
-    frame.render_widget(paragraph, popup_area);
+    let labels: Vec<&str> = app.runtimes.iter().map(|s| s.as_str()).collect();
+    draw_checkbox_popup(
+        frame,
+        &labels,
+        &app.selected_runtimes,
+        app.runtime_cursor,
+        "Runtime",
+        tc,
+        None,
+        false,
+    );
 }
 
 fn draw_license_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
@@ -2940,6 +2885,7 @@ fn draw_license_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
         "License",
         tc,
         None,
+        false,
     );
 }
 
