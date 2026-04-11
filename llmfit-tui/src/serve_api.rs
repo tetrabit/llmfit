@@ -962,7 +962,6 @@ fn fit_to_json(fit: &ModelFit) -> serde_json::Value {
         "utilization_pct": round1(fit.utilization_pct),
         "notes": fit.notes,
         "gguf_sources": fit.model.gguf_sources,
-        "capabilities": fit.model.capabilities,
         "license": fit.model.license,
         "supports_tp": fit.model.valid_tp_sizes(),
     })
@@ -1100,6 +1099,32 @@ mod tests {
             assert!(value.get("node").is_some());
             assert!(value.get("system").is_some());
         });
+    }
+
+    #[test]
+    fn fit_to_json_exposes_capability_labels_once() {
+        let db = ModelDatabase::new();
+        let model = db
+            .get_all_models()
+            .iter()
+            .find(|m| !m.effective_capabilities().is_empty())
+            .expect("expected at least one model with capabilities")
+            .clone();
+        let fit = ModelFit::analyze(&model, &SystemSpecs::detect());
+
+        let value = fit_to_json(&fit);
+        let capabilities = value
+            .get("capabilities")
+            .and_then(|caps| caps.as_array())
+            .expect("capabilities array");
+
+        let expected = model
+            .effective_capabilities()
+            .into_iter()
+            .map(|cap| serde_json::Value::String(cap.label().to_string()))
+            .collect::<Vec<_>>();
+
+        assert_eq!(capabilities, &expected);
     }
 
     #[test]
