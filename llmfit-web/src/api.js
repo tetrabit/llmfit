@@ -26,7 +26,6 @@ export function buildModelsQuery(filters) {
   }
 
   const minFit = filters.minFit || 'marginal';
-  const needsClientFitProcessing = minFit === 'too_tight';
 
   if (minFit === 'all' || minFit === 'too_tight') {
     // too_tight is the lowest level, so this returns all fits.
@@ -48,6 +47,11 @@ export function buildModelsQuery(filters) {
 
   if (filters.sort) {
     params.set('sort', filters.sort);
+  }
+
+  const limit = Number.parseInt(String(filters.limit ?? ''), 10);
+  if (Number.isFinite(limit) && limit > 0) {
+    params.set('limit', String(limit));
   }
 
 
