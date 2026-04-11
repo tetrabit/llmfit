@@ -29,6 +29,10 @@ struct SystemInfo {
 }
 
 #[derive(Serialize, Clone)]
+// Desktop intentionally owns a thin presentation adapter layer for now.
+// Reuse shared llmfit-core helpers where possible, but keep the desktop JSON
+// shape independent from the TUI/API presentation model until the surfaces are
+// intentionally unified.
 struct ModelFitInfo {
     name: String,
     params_b: f64,

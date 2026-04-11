@@ -31,6 +31,11 @@ Small Tauri desktop app that wraps `llmfit-core` with a static HTML/CSS/JS front
 - UI assets ship from `./ui`, not from `llmfit-web/dist`.
 - `src/main.rs` manually maps `llmfit-core` enums like `RunMode` and `InferenceRuntime`; core enum additions can break desktop until those match arms are updated.
 
+## CURRENT ARCHITECTURE DECISION
+
+- Keep the desktop app as a thin, desktop-owned presentation adapter for now instead of forcing a shared presentation model with the TUI/server path.
+- Reduce drift by reusing shared `llmfit-core` helpers where possible (for example provider/tag mapping and installed-state logic), but do not collapse the desktop surface into the web/API shape until the product fields stabilize.
+
 ## COMMANDS
 
 ```bash
