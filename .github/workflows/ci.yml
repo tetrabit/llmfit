@@ -85,6 +85,9 @@ jobs:
       - name: Run tests
         run: cargo test --verbose
 
+      - name: Run API smoke tests
+        run: python3 scripts/test_api.py --spawn
+
   fmt:
     name: Rustfmt
     runs-on: ubuntu-latest
