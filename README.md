@@ -272,7 +272,7 @@ llmfit recommend --json --limit 5
 # Recommendations filtered by use case
 llmfit recommend --json --use-case coding --limit 3
 
-# Force a specific runtime (bypass automatic MLX selection on Apple Silicon)
+# Force a specific runtime for analysis (subject to current runtime/backend support)
 llmfit recommend --force-runtime llamacpp
 llmfit recommend --force-runtime llamacpp --use-case coding --limit 3
 
@@ -318,7 +318,7 @@ Supported query params for `models`/`models/top`:
 - `sort`: `score|tps|params|mem|ctx|date|use_case`
 - `include_too_tight`: include non-runnable rows (default `false` on `/top`, `true` on `/models`)
 - `max_context`: per-request context cap for memory estimation
-- `force_runtime`: `mlx|llamacpp|vllm` — override automatic runtime selection during analysis
+- `force_runtime`: `mlx|llamacpp|vllm` — override automatic runtime selection during analysis. This is intended as a runtime constraint on the current host, not a cross-host simulation mode.
 
 Validate API behavior locally:
 
@@ -428,11 +428,11 @@ llmfit plan "Qwen/Qwen2.5-Coder-0.5B-Instruct" --context 8192 --json
    - **Ascend** -- Detected via `npu-smi`.
    - **Backend detection** -- Automatically identifies the acceleration backend (CUDA, Metal, ROCm, SYCL, CPU ARM, CPU x86, Ascend) for speed estimation.
 
-2. **Model database** -- Hundreds of models sourced from the HuggingFace API. The scraper writes both `data/hf_models.json` (repo reference copy) and `llmfit-core/data/hf_models.json` (the crate-local file embedded at compile time). At runtime, `llmfit-core` starts from the embedded crate-local JSON and can then merge cache/metadata overlays. Memory requirements are computed from parameter counts across a quantization hierarchy (Q8_0 through Q2_K). VRAM is the primary constraint for GPU inference; system RAM is the fallback pool for CPU-only or CPU-offload execution.
+2. **Model database** -- Hundreds of models sourced from the HuggingFace API. The scraper writes both `data/hf_models.json` (repo reference copy) and `llmfit-core/data/hf_models.json` (the crate-local file embedded at compile time). At runtime, `llmfit-core` starts from the embedded crate-local JSON and can then merge cache/metadata overlays. For the GGUF / llama.cpp path, memory requirements are computed across a quantization hierarchy (Q8_0 through Q2_K). VRAM is the primary constraint for discrete-GPU inference; system RAM is the fallback pool for CPU-only or CPU-offload execution.
 
    **MoE support** -- Models with Mixture-of-Experts architectures (Mixtral, DeepSeek-V2/V3) are detected automatically. Only a subset of experts is active per token, so the effective VRAM requirement is much lower than total parameter count suggests. For example, Mixtral 8x7B has 46.7B total parameters but only activates ~12.9B per token, reducing VRAM from 23.9 GB to ~6.6 GB with expert offloading.
 
-3. **Dynamic quantization** -- Instead of assuming a fixed quantization, llmfit tries the best quality quantization that fits your hardware. It walks a hierarchy from Q8_0 (best quality) down to Q2_K (most compressed), picking the highest quality that fits in available memory. If nothing fits at full context, it tries again at half context.
+3. **Dynamic quantization** -- For GGUF / llama.cpp-style paths, llmfit tries the best quality quantization that fits your hardware. It walks a hierarchy from Q8_0 (best quality) down to Q2_K (most compressed), picking the highest quality that fits in available memory. If nothing fits at full context, it tries again at half context. Other runtimes can use different quantization ladders or pre-quantized model formats.
 
 4. **Multi-dimensional scoring** -- Each model is scored across four dimensions (0–100 each):
 
@@ -467,18 +467,22 @@ llmfit plan "Qwen/Qwen2.5-Coder-0.5B-Instruct" --context 8192 --json
 
    Fallback formula: `K / params_b × quant_speed_multiplier`, with penalties for CPU offload (0.5×), CPU-only (0.3×), and MoE expert switching (0.8×).
 
-6. **Fit analysis** -- Each model is evaluated for memory compatibility:
+6. **Fit analysis** -- Each model is evaluated for memory compatibility on the current host/runtime path:
 
    **Run modes:**
    - **GPU** -- Model fits in VRAM. Fast inference.
    - **MoE** -- Mixture-of-Experts with expert offloading. Active experts in VRAM, inactive in RAM.
    - **CPU+GPU** -- VRAM insufficient, spills to system RAM with partial GPU offload.
-   - **CPU** -- No GPU. Model loaded entirely into system RAM.
+    - **CPU** -- No GPU. Model loaded entirely into system RAM.
 
    **Fit levels:**
    - **Perfect** -- Recommended memory met on GPU. Requires GPU acceleration.
    - **Good** -- Fits with headroom. Best achievable for MoE offload or CPU+GPU.
-   - **Marginal** -- Tight fit, or CPU-only (CPU-only always caps here).
+    - **Marginal** -- Tight fit, or CPU-only (CPU-only always caps here).
+   
+   Notes:
+   - CPU offload is a distinct fallback path from CPU-only execution.
+   - Some pre-quantized or runtime-specific model paths can surface tighter constraints than the generic GGUF description above.
    - **Too Tight** -- Not enough VRAM or system RAM anywhere.
 
 ---
