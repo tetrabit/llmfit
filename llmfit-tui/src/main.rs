@@ -1151,6 +1151,14 @@ fn run_recommend(
             }
         });
 
+    if let Some(forced_rt) = forced_rt {
+        if let Err(err) = llmfit_core::fit::validate_forced_runtime_for_system(&specs, forced_rt)
+        {
+            eprintln!("Invalid --force-runtime setting: {err}");
+            std::process::exit(1);
+        }
+    }
+
     // Query installed models across local providers so that `fit.installed`
     // is populated for CLI output (same behavior as the TUI). This also causes
     // backends like Docker Model Runner to receive a probe request when

@@ -652,6 +652,10 @@ fn filtered_fits(
 
     let context_limit = query.max_context.or(state.context_limit);
     let forced_rt = parse_force_runtime(query.force_runtime.as_deref())?;
+    if let Some(forced_rt) = forced_rt {
+        llmfit_core::fit::validate_forced_runtime_for_system(&state.specs, forced_rt)
+            .map_err(ApiError::bad_request)?;
+    }
     let mut fits: Vec<ModelFit> = state
         .models
         .iter()
@@ -1001,6 +1005,34 @@ mod tests {
         build_router(test_state())
     }
 
+    fn cpu_only_test_router() -> Router {
+        let db = ModelDatabase::new();
+        build_router(Arc::new(AppState {
+            node_name: "test-node".to_string(),
+            os: "test-os".to_string(),
+            specs: SystemSpecs {
+                total_ram_gb: 32.0,
+                available_ram_gb: 24.0,
+                total_cpu_cores: 8,
+                cpu_name: "x86".to_string(),
+                has_gpu: false,
+                gpu_vram_gb: None,
+                total_gpu_vram_gb: None,
+                gpu_name: None,
+                gpu_count: 0,
+                unified_memory: false,
+                backend: GpuBackend::CpuX86,
+                gpus: vec![],
+                cluster_mode: false,
+                cluster_node_count: 0,
+            },
+            models: db.get_all_models().clone(),
+            context_limit: None,
+            active_download: tokio::sync::RwLock::new(None),
+            download_counter: std::sync::atomic::AtomicU32::new(0),
+        }))
+    }
+
     fn find_asset_path_with_ext(ext: &str) -> Option<&'static EmbeddedAsset> {
         EMBEDDED_WEB_ASSETS
             .iter()
@@ -1125,6 +1157,30 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(capabilities, &expected);
+    }
+
+    #[test]
+    fn invalid_force_runtime_returns_bad_request_for_current_host() {
+        run_async(async {
+            let response = cpu_only_test_router()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/v1/models?force_runtime=mlx")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            let error = value
+                .get("error")
+                .and_then(|v| v.as_str())
+                .expect("error string");
+            assert!(error.contains("Apple Silicon / Metal unified-memory host"));
+        });
     }
 
     #[test]

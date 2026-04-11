@@ -26,6 +26,37 @@ impl InferenceRuntime {
     }
 }
 
+pub fn validate_forced_runtime_for_system(
+    system: &SystemSpecs,
+    runtime: InferenceRuntime,
+) -> Result<(), String> {
+    match runtime {
+        InferenceRuntime::LlamaCpp => Ok(()),
+        InferenceRuntime::Mlx => {
+            if system.backend == GpuBackend::Metal && system.unified_memory {
+                Ok(())
+            } else {
+                Err(format!(
+                    "force_runtime={} requires an Apple Silicon / Metal unified-memory host",
+                    runtime.label().to_lowercase()
+                ))
+            }
+        }
+        InferenceRuntime::Vllm => {
+            if system.cluster_mode
+                || matches!(system.backend, GpuBackend::Cuda | GpuBackend::Rocm)
+            {
+                Ok(())
+            } else {
+                Err(format!(
+                    "force_runtime={} requires a CUDA/ROCm host or cluster mode",
+                    runtime.label().to_lowercase()
+                ))
+            }
+        }
+    }
+}
+
 /// Column to sort model fits by in the TUI/UI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SortColumn {
@@ -1652,6 +1683,51 @@ mod tests {
         );
 
         assert_eq!(fit.runtime, InferenceRuntime::Vllm);
+    }
+
+    #[test]
+    fn test_validate_forced_runtime_rejects_mlx_on_cuda() {
+        let system = test_system(32.0, true, Some(24.0));
+        let err = validate_forced_runtime_for_system(&system, InferenceRuntime::Mlx)
+            .expect_err("mlx should be rejected on CUDA hosts");
+        assert!(err.contains("Apple Silicon / Metal unified-memory host"));
+    }
+
+    #[test]
+    fn test_validate_forced_runtime_allows_mlx_on_apple_silicon() {
+        let mut system = test_system(16.0, true, Some(16.0));
+        system.backend = GpuBackend::Metal;
+        system.unified_memory = true;
+        assert!(validate_forced_runtime_for_system(&system, InferenceRuntime::Mlx).is_ok());
+    }
+
+    #[test]
+    fn test_validate_forced_runtime_rejects_vllm_on_cpu_only_host() {
+        let system = SystemSpecs {
+            total_ram_gb: 32.0,
+            available_ram_gb: 24.0,
+            total_cpu_cores: 8,
+            cpu_name: "x86".to_string(),
+            has_gpu: false,
+            gpu_vram_gb: None,
+            total_gpu_vram_gb: None,
+            gpu_name: None,
+            gpu_count: 0,
+            unified_memory: false,
+            backend: GpuBackend::CpuX86,
+            gpus: vec![],
+            cluster_mode: false,
+            cluster_node_count: 0,
+        };
+        let err = validate_forced_runtime_for_system(&system, InferenceRuntime::Vllm)
+            .expect_err("vllm should be rejected without CUDA/ROCm or cluster mode");
+        assert!(err.contains("CUDA/ROCm host or cluster mode"));
+    }
+
+    #[test]
+    fn test_validate_forced_runtime_allows_vllm_on_cuda() {
+        let system = test_system(32.0, true, Some(24.0));
+        assert!(validate_forced_runtime_for_system(&system, InferenceRuntime::Vllm).is_ok());
     }
 
     #[test]
