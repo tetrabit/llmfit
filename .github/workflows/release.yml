@@ -167,6 +167,19 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: lts/*
+          cache: npm
+          cache-dependency-path: llmfit-web/package-lock.json
+
+      - name: Build web dashboard assets
+        run: |
+          cd llmfit-web
+          npm ci
+          npm run build
+
       - name: Publish llmfit-core to crates.io
         run: cargo publish -p llmfit-core --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
