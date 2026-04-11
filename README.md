@@ -426,7 +426,7 @@ llmfit plan "Qwen/Qwen2.5-Coder-0.5B-Instruct" --context 8192 --json
    - **Ascend** -- Detected via `npu-smi`.
    - **Backend detection** -- Automatically identifies the acceleration backend (CUDA, Metal, ROCm, SYCL, CPU ARM, CPU x86, Ascend) for speed estimation.
 
-2. **Model database** -- Hundreds models sourced from the HuggingFace API, stored in `data/hf_models.json` and embedded at compile time. Memory requirements are computed from parameter counts across a quantization hierarchy (Q8_0 through Q2_K). VRAM is the primary constraint for GPU inference; system RAM is the fallback for CPU-only execution.
+2. **Model database** -- Hundreds of models sourced from the HuggingFace API. The scraper writes both `data/hf_models.json` (repo reference copy) and `llmfit-core/data/hf_models.json` (the crate-local file embedded at compile time). At runtime, `llmfit-core` starts from the embedded crate-local JSON and can then merge cache/metadata overlays. Memory requirements are computed from parameter counts across a quantization hierarchy (Q8_0 through Q2_K). VRAM is the primary constraint for GPU inference; system RAM is the fallback pool for CPU-only or CPU-offload execution.
 
    **MoE support** -- Models with Mixture-of-Experts architectures (Mixtral, DeepSeek-V2/V3) are detected automatically. Only a subset of experts is active per token, so the effective VRAM requirement is much lower than total parameter count suggests. For example, Mixtral 8x7B has 46.7B total parameters but only activates ~12.9B per token, reducing VRAM from 23.9 GB to ~6.6 GB with expert offloading.
 
@@ -503,7 +503,7 @@ python3 scripts/scrape_hf_models.py
 cargo build --release
 ```
 
-The scraper writes `data/hf_models.json`, which is baked into the binary via `include_str!`. The automated update script backs up existing data, validates JSON output, and rebuilds the binary.
+The scraper writes both `data/hf_models.json` and `llmfit-core/data/hf_models.json`. The binary embeds the crate-local `llmfit-core/data/hf_models.json` via `include_str!`, while the repo-root copy exists for repo tooling and inspection. The automated update script backs up the root copy, validates JSON output, and rebuilds the binary so the embedded crate-local data is refreshed too.
 
 Project policy: runtime estimate behavior is owned by `llmfit-core`. The
 Python scraper may mirror estimate constants for generation, but Rust is the
@@ -552,7 +552,7 @@ curl -sL https://opensource.org/license/MIT -o LICENSE
 # Or write your own. The Cargo.toml declares license = "MIT".
 ```
 
-- `data/hf_models.json` is committed. It is embedded at compile time and must be present in the published crate.
+- `llmfit-core/data/hf_models.json` is the embedded runtime authority and must be present in the published crate. The repo-root `data/hf_models.json` is a mirrored/generated reference copy.
 - The `exclude` list in `Cargo.toml` keeps `target/`, `scripts/`, and `demo.gif` out of the published crate to keep the download small.
 
 To publish updates:

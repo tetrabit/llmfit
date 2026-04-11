@@ -2,8 +2,8 @@
 # Automated model database update script for llmfit
 # This script:
 # 1. Runs the HuggingFace model scraper to fetch latest model data
-# 2. Verifies the JSON output is valid
-# 3. Rebuilds the Rust binary with updated embedded data
+# 2. Verifies the generated JSON output is valid
+# 3. Rebuilds the Rust binary with updated embedded crate-local data
 # 4. Optionally runs tests to ensure everything works
 
 set -e  # Exit on error
@@ -11,6 +11,7 @@ set -e  # Exit on error
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 DATA_FILE="$PROJECT_ROOT/data/hf_models.json"
+EMBEDDED_DATA_FILE="$PROJECT_ROOT/llmfit-core/data/hf_models.json"
 
 # Colors for output
 RED='\033[0;31m'
@@ -53,10 +54,10 @@ fi
 
 echo
 
-# Verify JSON is valid
+# Verify JSON is valid in both mirrored locations
 echo -e "${BLUE}🔍 Verifying JSON output...${NC}"
 if ! python3 -m json.tool "$DATA_FILE" > /dev/null 2>&1; then
-    echo -e "${RED}✗ Invalid JSON generated${NC}"
+    echo -e "${RED}✗ Invalid JSON generated in root data file${NC}"
     # Restore backup if available
     if [ -f "$BACKUP_FILE" ]; then
         echo -e "${YELLOW}📦 Restoring backup...${NC}"
@@ -65,8 +66,17 @@ if ! python3 -m json.tool "$DATA_FILE" > /dev/null 2>&1; then
     exit 1
 fi
 
+if ! python3 -m json.tool "$EMBEDDED_DATA_FILE" > /dev/null 2>&1; then
+    echo -e "${RED}✗ Invalid JSON generated in embedded crate-local data file${NC}"
+    if [ -f "$BACKUP_FILE" ]; then
+        echo -e "${YELLOW}📦 Restoring backup...${NC}"
+        mv "$BACKUP_FILE" "$DATA_FILE"
+    fi
+    exit 1
+fi
+
 MODEL_COUNT=$(python3 -c "import json; print(len(json.load(open('$DATA_FILE'))))")
-echo -e "${GREEN}✓ Valid JSON with $MODEL_COUNT models${NC}"
+echo -e "${GREEN}✓ Valid mirrored JSON with $MODEL_COUNT models${NC}"
 echo
 
 # Check if cargo is available
@@ -100,7 +110,7 @@ echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━
 echo
 echo -e "${BLUE}Next steps:${NC}"
 echo "  • Run './target/release/llmfit' to test the updated binary"
-echo "  • Check 'data/hf_models.json' for the updated model list"
+echo "  • Check both 'data/hf_models.json' and 'llmfit-core/data/hf_models.json' for the updated model list"
 if [ ! -z "$BACKUP_FILE" ]; then
     echo "  • Delete backup file if satisfied: rm $BACKUP_FILE"
 fi

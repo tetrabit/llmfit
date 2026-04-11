@@ -686,6 +686,8 @@ struct HfModelEntry {
     license: Option<String>,
 }
 
+// Runtime authority: the binary embeds the crate-local model database here.
+// The repo-root data/hf_models.json is a mirrored/generated reference copy.
 const HF_MODELS_JSON: &str = include_str!("../data/hf_models.json");
 
 pub struct ModelDatabase {

@@ -364,7 +364,7 @@ llmfit plan "Qwen/Qwen2.5-Coder-0.5B-Instruct" --context 8192 --json
    - **Ascend** -- 通过 `npu-smi` 检测。
    - **后端检测** -- 自动识别加速后端（CUDA、Metal、ROCm、SYCL、CPU ARM、CPU x86、Ascend）用于速度估算。
 
-2. **模型数据库** -- 数百个模型来源于 HuggingFace API，存储在 `data/hf_models.json` 中并在编译时嵌入。内存需求根据量化层级（Q8_0 到 Q2_K）的参数量计算。VRAM 是 GPU 推理的主要约束；系统 RAM 是纯 CPU 执行的后备方案。
+2. **模型数据库** -- 数百个模型来源于 HuggingFace API。爬虫会同时写入 `data/hf_models.json`（仓库根目录参考副本）和 `llmfit-core/data/hf_models.json`（编译时真正嵌入的 crate 本地文件）。运行时 `llmfit-core` 先从嵌入的 crate 本地 JSON 开始，再按需合并缓存/元数据覆盖层。内存需求根据量化层级（Q8_0 到 Q2_K）的参数量计算。VRAM 是 GPU 推理的主要约束；系统 RAM 是纯 CPU 或 CPU offload 执行时的后备内存池。
 
    **MoE 支持** -- 自动检测混合专家架构（Mixtral、DeepSeek-V2/V3）的模型。每个 token 只有部分专家处于活跃状态，因此实际 VRAM 需求远低于总参数量的暗示。例如，Mixtral 8x7B 总参数量为 46.7B，但每个 token 仅激活约 12.9B，通过专家卸载将 VRAM 需求从 23.9 GB 降至约 6.6 GB。
 
@@ -441,7 +441,7 @@ python3 scripts/scrape_hf_models.py
 cargo build --release
 ```
 
-爬虫将结果写入 `data/hf_models.json`，通过 `include_str!` 在编译时嵌入二进制文件。自动更新脚本会备份现有数据、验证 JSON 输出并重新构建二进制文件。
+爬虫会同时写入 `data/hf_models.json` 和 `llmfit-core/data/hf_models.json`。二进制真正通过 `include_str!` 嵌入的是 crate 本地的 `llmfit-core/data/hf_models.json`；仓库根目录副本主要用于仓库工具和人工检查。自动更新脚本会备份根目录副本、验证 JSON 输出，并重新构建二进制文件，使嵌入的 crate 本地数据也同步刷新。
 
 默认情况下，爬虫会使用来自 [unsloth](https://huggingface.co/unsloth) 和 [bartowski](https://huggingface.co/bartowski) 等提供商的已知 GGUF 下载源来丰富模型信息。结果缓存在 `data/gguf_sources_cache.json` 中（7 天 TTL），以避免重复 API 调用。使用 `--no-gguf-sources` 可跳过丰富步骤以加快爬取速度。
 
@@ -497,7 +497,7 @@ curl -sL https://opensource.org/license/MIT -o LICENSE
 # 或自行编写。Cargo.toml 声明 license = "MIT"。
 ```
 
-- `data/hf_models.json` 已提交。它在编译时嵌入，必须存在于发布的 crate 中。
+- `llmfit-core/data/hf_models.json` 是运行时嵌入的权威数据文件，必须存在于发布的 crate 中；根目录 `data/hf_models.json` 是镜像/生成出的参考副本。
 - `Cargo.toml` 中的 `exclude` 列表将 `target/`、`scripts/` 和 `demo.gif` 排除在发布的 crate 之外，以减小下载体积。
 
 发布更新：
