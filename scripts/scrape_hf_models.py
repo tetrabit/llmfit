@@ -2965,7 +2965,10 @@ def main():
         gguf_enriched = enrich_gguf_sources(results)
         print(f"  Found GGUF sources for {gguf_enriched} models")
 
-    # Write to both locations: repo root (for reference) and llmfit-core (compiled into binary)
+    # Long-term project decision: keep writing both locations for now.
+    # - llmfit-core/data/hf_models.json is the runtime authority embedded into the binary.
+    # - data/hf_models.json remains a generated/reference copy for repo tooling and inspection.
+    # Any future simplification should be intentional and paired with updated tooling/docs.
     output_paths = ["data/hf_models.json", "llmfit-core/data/hf_models.json"]
     for output_path in output_paths:
         os.makedirs(os.path.dirname(output_path), exist_ok=True)

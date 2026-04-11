@@ -507,6 +507,8 @@ cargo build --release
 
 The scraper writes both `data/hf_models.json` and `llmfit-core/data/hf_models.json`. The binary embeds the crate-local `llmfit-core/data/hf_models.json` via `include_str!`, while the repo-root copy exists for repo tooling and inspection. The automated update script backs up the root copy, validates JSON output, and rebuilds the binary so the embedded crate-local data is refreshed too.
 
+Long-term data-layout decision: keep the mirrored two-file layout for now. `llmfit-core/data/hf_models.json` remains the runtime authority, while the repo-root `data/hf_models.json` stays as a generated/reference copy for repo tooling and inspection. Future work should enforce parity or simplify the pipeline intentionally, not by letting one copy drift.
+
 Project policy: runtime estimate behavior is owned by `llmfit-core`. The
 Python scraper may mirror estimate constants for generation, but Rust is the
 authoritative source of fit, memory, and speed semantics used by the app.

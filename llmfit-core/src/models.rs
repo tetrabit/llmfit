@@ -687,7 +687,10 @@ struct HfModelEntry {
 }
 
 // Runtime authority: the binary embeds the crate-local model database here.
-// The repo-root data/hf_models.json is a mirrored/generated reference copy.
+// Long-term decision: keep the repo-root data/hf_models.json as a mirrored /
+// generated reference copy for now, rather than collapsing the layout
+// accidentally. Any simplification should happen as an intentional pipeline
+// change with updated tooling and docs.
 const HF_MODELS_JSON: &str = include_str!("../data/hf_models.json");
 
 pub struct ModelDatabase {
