@@ -143,9 +143,14 @@ fn reconcile_installed_flags(fits: &mut [ModelFit], installed: &HashSet<String>)
     }
 }
 
+fn resolve_ollama_pull_tag(model_name: &str) -> String {
+    providers::ollama_pull_tag(model_name).unwrap_or_else(|| model_name.to_string())
+}
+
 #[tauri::command]
 fn start_pull(model_tag: String, state: State<'_, AppState>) -> Result<String, String> {
-    let handle = state.ollama.start_pull(&model_tag)?;
+    let pull_tag = resolve_ollama_pull_tag(&model_tag);
+    let handle = state.ollama.start_pull(&pull_tag)?;
     let mut pull = state.pull_handle.lock().map_err(|e| e.to_string())?;
     *pull = Some(handle);
     Ok("started".to_string())
@@ -256,5 +261,17 @@ mod tests {
         reconcile_installed_flags(std::slice::from_mut(&mut fit), &installed);
 
         assert!(!fit.installed);
+    }
+
+    #[test]
+    fn resolve_ollama_pull_tag_maps_known_hf_names() {
+        let tag = resolve_ollama_pull_tag("meta-llama/Llama-3.1-8B-Instruct");
+        assert_eq!(tag, "llama3.1:8b");
+    }
+
+    #[test]
+    fn resolve_ollama_pull_tag_keeps_unknown_names() {
+        let tag = resolve_ollama_pull_tag("totally-unknown/model-xyz");
+        assert_eq!(tag, "totally-unknown/model-xyz");
     }
 }
