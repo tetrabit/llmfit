@@ -254,20 +254,22 @@ QUANT_BPP = {
     "F32": 4.0,
     "F16": 2.0,
     "BF16": 2.0,
-    "Q8_0": 1.0,
-    "Q6_K": 0.75,
-    "Q5_K_M": 0.625,
-    "Q4_K_M": 0.5,
-    "Q4_0": 0.5,
-    "Q3_K_M": 0.4375,
-    "Q2_K": 0.3125,
+    "Q8_0": 1.05,
+    "Q6_K": 0.80,
+    "Q5_K_M": 0.68,
+    "Q4_K_M": 0.58,
+    "Q4_0": 0.58,
+    "Q3_K_M": 0.48,
+    "Q2_K": 0.37,
     "AWQ-4bit": 0.5,
     "AWQ-8bit": 1.0,
     "GPTQ-Int4": 0.5,
     "GPTQ-Int8": 1.0,
 }
 
-# Overhead multiplier for runtime memory beyond just model weights
+# Overhead multiplier for scraper-side RAM heuristics beyond just model weights.
+# Rust remains the runtime authority for estimate behavior; this script mirrors
+# the quant-memory constants but still applies its own generation heuristic.
 RUNTIME_OVERHEAD = 1.2  # ~20% overhead for KV cache, activations, OS
 
 # Known MoE (Mixture of Experts) architecture configurations
