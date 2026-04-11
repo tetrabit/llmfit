@@ -11,6 +11,7 @@ Exits with code 1 if any model is missing. Suitable for CI.
 """
 
 import argparse
+import ast
 import hashlib
 import json
 import re
@@ -24,6 +25,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 HF_MODELS_PATH = REPO_ROOT / "data" / "hf_models.json"
 EMBEDDED_HF_MODELS_PATH = REPO_ROOT / "llmfit-core" / "data" / "hf_models.json"
 PROVIDERS_RS_PATH = REPO_ROOT / "llmfit-core" / "src" / "providers.rs"
+MODELS_RS_PATH = REPO_ROOT / "llmfit-core" / "src" / "models.rs"
+SCRAPER_PY_PATH = REPO_ROOT / "scripts" / "scrape_hf_models.py"
 
 HEADERS = {"User-Agent": "llmfit-verify/1.0"}
 REQUEST_DELAY = 0.3  # seconds between requests to avoid rate limiting
@@ -155,6 +158,69 @@ def verify_hf_sync() -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# Estimate constant parity verification
+# ---------------------------------------------------------------------------
+
+
+def load_python_quant_bpp() -> dict[str, float]:
+    src = SCRAPER_PY_PATH.read_text()
+    match = re.search(r"QUANT_BPP\s*=\s*(\{.*?\n\})", src, re.DOTALL)
+    if not match:
+        print("ERROR: Could not find QUANT_BPP in scrape_hf_models.py")
+        sys.exit(2)
+    return ast.literal_eval(match.group(1))
+
+
+def load_rust_quant_memory_bpp() -> dict[str, float]:
+    src = MODELS_RS_PATH.read_text()
+    match = re.search(
+        r"pub fn quant_memory_bpp\(quant: &str\) -> f64 \{\s*match quant \{(.*?)\n\s*}\n}",
+        src,
+        re.DOTALL,
+    )
+    if not match:
+        print("ERROR: Could not find quant_memory_bpp in models.rs")
+        sys.exit(2)
+
+    body = match.group(1)
+    mapping: dict[str, float] = {}
+    for line in body.splitlines():
+        stripped = line.strip().rstrip(",")
+        if "=>" not in stripped:
+            continue
+        lhs, rhs = [part.strip() for part in stripped.split("=>", 1)]
+        if lhs == "_":
+            continue
+        keys = [part.strip().strip('"') for part in lhs.split("|")]
+        try:
+            value = float(rhs)
+        except ValueError:
+            continue
+        for key in keys:
+            mapping[key] = value
+    return mapping
+
+
+def verify_estimate_parity() -> list[str]:
+    failures = []
+    py_map = load_python_quant_bpp()
+    rust_map = load_rust_quant_memory_bpp()
+
+    overlapping = sorted(set(py_map) & set(rust_map))
+    print(
+        "\n=== Estimate constant parity (Python QUANT_BPP vs Rust quant_memory_bpp) ===\n"
+    )
+    for quant in overlapping:
+        py_value = float(py_map[quant])
+        rust_value = float(rust_map[quant])
+        print(f"  {quant:10s} python={py_value:<5} rust={rust_value:<5}")
+        if abs(py_value - rust_value) > 1e-9:
+            failures.append(f"{quant}: python={py_value} rust={rust_value}")
+
+    return failures
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -168,12 +234,22 @@ def main():
         action="store_true",
         help="Check root and embedded HF JSON stay mirrored",
     )
+    parser.add_argument(
+        "--estimate-parity",
+        action="store_true",
+        help="Check Python QUANT_BPP stays aligned with Rust quant_memory_bpp",
+    )
     args = parser.parse_args()
 
     # Default: check both
-    check_hf = args.hf or (not args.ollama and not args.sync)
-    check_ollama = args.ollama or (not args.hf and not args.sync)
+    check_hf = args.hf or (
+        not args.ollama and not args.sync and not args.estimate_parity
+    )
+    check_ollama = args.ollama or (
+        not args.hf and not args.sync and not args.estimate_parity
+    )
     check_sync = args.sync
+    check_estimate_parity = args.estimate_parity
 
     failures = False
 
@@ -210,6 +286,16 @@ def main():
                 print(f"    - {failure}")
         else:
             print("\n  Root and embedded HF JSON are in sync ✓")
+
+    if check_estimate_parity:
+        parity_failures = verify_estimate_parity()
+        if parity_failures:
+            failures = True
+            print("\n  ⚠ Estimate constant parity mismatch detected:")
+            for failure in parity_failures:
+                print(f"    - {failure}")
+        else:
+            print("\n  Python and Rust estimate constants are in parity ✓")
 
     print()
     if failures:
