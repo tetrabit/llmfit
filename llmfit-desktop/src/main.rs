@@ -3,8 +3,9 @@
 use llmfit_core::fit::{FitLevel, InferenceRuntime, ModelFit, RunMode};
 use llmfit_core::hardware::SystemSpecs;
 use llmfit_core::models::ModelDatabase;
-use llmfit_core::providers::{ModelProvider, OllamaProvider, PullEvent};
+use llmfit_core::providers::{self, ModelProvider, OllamaProvider, PullEvent};
 use serde::Serialize;
+use std::collections::HashSet;
 use std::sync::Mutex;
 use tauri::State;
 
@@ -84,15 +85,18 @@ fn get_system_specs() -> Result<SystemInfo, String> {
 }
 
 #[tauri::command]
-fn get_model_fits() -> Result<Vec<ModelFitInfo>, String> {
+fn get_model_fits(state: State<'_, AppState>) -> Result<Vec<ModelFitInfo>, String> {
     let specs = SystemSpecs::detect();
     let db = ModelDatabase::new();
+    let installed = state.ollama.installed_models();
 
     let mut fits: Vec<ModelFit> = db
         .get_all_models()
         .iter()
         .map(|m| ModelFit::analyze(m, &specs))
         .collect();
+
+    reconcile_installed_flags(&mut fits, &installed);
 
     fits = llmfit_core::fit::rank_models_by_fit(fits);
 
@@ -131,6 +135,12 @@ fn get_model_fits() -> Result<Vec<ModelFitInfo>, String> {
             release_date: f.model.release_date.clone(),
         })
         .collect())
+}
+
+fn reconcile_installed_flags(fits: &mut [ModelFit], installed: &HashSet<String>) {
+    for fit in fits {
+        fit.installed = providers::is_model_installed(&fit.model.name, installed);
+    }
 }
 
 #[tauri::command]
@@ -202,4 +212,49 @@ fn main() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reconcile_installed_flags_marks_ollama_matches() {
+        let db = ModelDatabase::new();
+        let mut model = db
+            .get_all_models()
+            .first()
+            .expect("expected at least one model")
+            .clone();
+        model.name = "Qwen/Qwen2.5-Coder-7B-Instruct".to_string();
+
+        let specs = SystemSpecs::detect();
+        let mut fit = ModelFit::analyze(&model, &specs);
+        fit.installed = false;
+
+        let installed = HashSet::from(["qwen2.5-coder:7b".to_string()]);
+        reconcile_installed_flags(std::slice::from_mut(&mut fit), &installed);
+
+        assert!(fit.installed);
+    }
+
+    #[test]
+    fn reconcile_installed_flags_leaves_unknown_models_uninstalled() {
+        let db = ModelDatabase::new();
+        let mut model = db
+            .get_all_models()
+            .first()
+            .expect("expected at least one model")
+            .clone();
+        model.name = "example/unknown-model".to_string();
+
+        let specs = SystemSpecs::detect();
+        let mut fit = ModelFit::analyze(&model, &specs);
+        fit.installed = false;
+
+        let installed = HashSet::from(["qwen2.5-coder:7b".to_string()]);
+        reconcile_installed_flags(std::slice::from_mut(&mut fit), &installed);
+
+        assert!(!fit.installed);
+    }
 }
