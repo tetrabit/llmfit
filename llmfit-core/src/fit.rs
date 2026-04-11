@@ -130,11 +130,17 @@ impl ModelFit {
         Self::analyze_inner(model, system, context_limit, None)
     }
 
-    /// Analyze with an optional runtime override. When `force_runtime` is
-    /// `Some`, the automatic runtime selection (which prefers MLX on Apple
-    /// Silicon) is bypassed so the caller can request e.g. llama.cpp results
-    /// even on a Metal system.  Pre-quantized models always use vLLM
-    /// regardless of the override.
+    /// Analyze with an optional runtime override.
+    ///
+    /// Project policy: `force_runtime` is a strict execution constraint for
+    /// the current host, not a hypothetical cross-host simulation mode.
+    /// Callers should reject impossible host/runtime pairs before analysis,
+    /// and when a forced runtime is valid they should return only models that
+    /// can actually execute under that runtime on the current host.
+    ///
+    /// This helper only records the requested override inside the fit engine;
+    /// CLI/API entrypoints are responsible for validating impossible
+    /// combinations and surfacing a user-facing error.
     pub fn analyze_with_forced_runtime(
         model: &LlmModel,
         system: &SystemSpecs,
@@ -176,8 +182,12 @@ impl ModelFit {
 
         // Determine inference runtime up front so path selection can use
         // the correct quantization hierarchy.
-        // Honour the force_runtime override first if provided; otherwise
-        // pre-quantized models default to vLLM, falling back to auto-detect.
+        //
+        // Policy reminder: `force_runtime` is meant to constrain results to a
+        // runtime the current host can really execute. Validation of impossible
+        // host/runtime pairs belongs at the CLI/API boundary, while this layer
+        // still applies model-level defaults such as pre-quantized models
+        // landing on vLLM.
         let runtime = if system.cluster_mode || model.is_prequantized() {
             InferenceRuntime::Vllm
         } else if let Some(forced) = force_runtime {

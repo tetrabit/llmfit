@@ -1132,7 +1132,10 @@ fn run_recommend(
     let specs = detect_specs(overrides);
     let db = ModelDatabase::new();
 
-    // Parse --force-runtime into an InferenceRuntime if provided
+    // Parse --force-runtime into an InferenceRuntime if provided.
+    // Project policy: this flag is a strict execution constraint for the
+    // current host. A follow-up task will make the CLI reject impossible
+    // host/runtime pairs before calling into the fit engine.
     let forced_rt = force_runtime
         .as_deref()
         .map(|rt| match rt.to_lowercase().as_str() {
