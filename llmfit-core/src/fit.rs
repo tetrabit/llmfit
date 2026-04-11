@@ -319,6 +319,9 @@ impl ModelFit {
                 } else if model.is_moe {
                     // MoE model: try expert offloading before CPU fallback
                     moe_offload_path(model, system, system_vram, min_vram, runtime, &mut notes)
+                } else if runtime == InferenceRuntime::Vllm && default_mem_required <= system_vram {
+                    notes.push("GPU: model loaded into VRAM".to_string());
+                    (RunMode::Gpu, default_mem_required, system_vram)
                 } else if let Some((_, best_mem)) = choose_quant(system_vram) {
                     notes.push("GPU: model loaded into VRAM".to_string());
                     (RunMode::Gpu, best_mem, system_vram)
@@ -1683,6 +1686,22 @@ mod tests {
         );
 
         assert_eq!(fit.runtime, InferenceRuntime::Vllm);
+    }
+
+    #[test]
+    fn test_prequantized_vllm_fit_does_not_emit_false_insufficient_memory_note() {
+        let mut model = test_model("32B", 12.6, Some(19.5));
+        model.format = models::ModelFormat::Awq;
+        model.quantization = "AWQ-4bit".to_string();
+        let system = test_system(64.0, true, Some(24.0));
+
+        let fit = ModelFit::analyze(&model, &system);
+
+        assert_eq!(fit.runtime, InferenceRuntime::Vllm);
+        assert_eq!(fit.run_mode, RunMode::Gpu);
+        assert!(fit.fit_level == FitLevel::Perfect || fit.fit_level == FitLevel::Good);
+        assert!(!fit.notes.iter().any(|note| note.contains("Insufficient VRAM and system RAM")));
+        assert!(fit.notes.iter().any(|note| note.contains("GPU: model loaded into VRAM")));
     }
 
     #[test]
