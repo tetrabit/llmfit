@@ -1814,6 +1814,9 @@ fn main() {
         ram: cli.ram,
         cpu_cores: cli.cpu_cores,
     };
+    // Auto-started dashboard uses the dashboard env/default path above
+    // (0.0.0.0:8787 by default), while explicit `serve` defaults stay on
+    // 127.0.0.1 unless the user passes --host.
     let auto_dashboard = !cli.no_dashboard
         && !cli.json
         && !matches!(cli.command.as_ref(), Some(Commands::Serve { .. }));

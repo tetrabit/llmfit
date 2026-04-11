@@ -241,6 +241,8 @@ To disable the auto-started dashboard, pass `--no-dashboard`:
 llmfit --no-dashboard
 ```
 
+Note: this auto-started dashboard is intentionally broader than the explicit `llmfit serve` defaults. `llmfit serve` binds to `127.0.0.1:8787` unless you pass `--host`, while the auto-started dashboard uses `LLMFIT_DASHBOARD_HOST` / `LLMFIT_DASHBOARD_PORT` and defaults to `0.0.0.0:8787` for easy LAN access.
+
 ### CLI mode
 
 Use `--cli` or any subcommand to get classic table output:
