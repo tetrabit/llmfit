@@ -24,20 +24,30 @@ import urllib.request
 from typing import Any, Dict, List, Optional, Tuple
 
 
-def _http_json(url: str, timeout: float = 10.0) -> Tuple[int, Dict[str, Any]]:
-    req = urllib.request.Request(url, method="GET")
+def _http_json(
+    url: str,
+    timeout: float = 10.0,
+    method: str = "GET",
+    payload: Optional[Dict[str, Any]] = None,
+) -> Tuple[int, Dict[str, Any]]:
+    data = None
+    headers = {}
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, method=method, data=data, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             code = resp.getcode()
-            body = resp.read().decode("utf-8")
-            data = json.loads(body) if body else {}
+            response_body = resp.read().decode("utf-8")
+            data = json.loads(response_body) if response_body else {}
             return code, data
     except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8") if exc.fp else ""
+        response_body = exc.read().decode("utf-8") if exc.fp else ""
         try:
-            data = json.loads(body) if body else {}
+            data = json.loads(response_body) if response_body else {}
         except json.JSONDecodeError:
-            data = {"raw": body}
+            data = {"raw": response_body}
         return exc.code, data
 
 
@@ -66,7 +76,15 @@ def test_system(base_url: str) -> None:
     _expect_keys(data, ["node", "system"], "/api/v1/system")
     _expect_keys(
         data["system"],
-        ["total_ram_gb", "available_ram_gb", "cpu_cores", "cpu_name", "has_gpu", "backend", "gpus"],
+        [
+            "total_ram_gb",
+            "available_ram_gb",
+            "cpu_cores",
+            "cpu_name",
+            "has_gpu",
+            "backend",
+            "gpus",
+        ],
         "/api/v1/system.system",
     )
 
@@ -74,10 +92,17 @@ def test_system(base_url: str) -> None:
 def test_models_envelope_and_limit(base_url: str) -> None:
     code, data = _http_json(f"{base_url}/api/v1/models?limit=3&sort=score")
     _assert(code == 200, f"/api/v1/models expected 200, got {code}")
-    _expect_keys(data, ["node", "system", "total_models", "returned_models", "filters", "models"], "/api/v1/models")
+    _expect_keys(
+        data,
+        ["node", "system", "total_models", "returned_models", "filters", "models"],
+        "/api/v1/models",
+    )
     _assert(isinstance(data["models"], list), "models must be a list")
     _assert(data["returned_models"] <= 3, "returned_models must respect limit")
-    _assert(len(data["models"]) == data["returned_models"], "returned_models must equal models length")
+    _assert(
+        len(data["models"]) == data["returned_models"],
+        "returned_models must equal models length",
+    )
 
 
 def test_top_endpoint_excludes_too_tight(base_url: str) -> None:
@@ -85,16 +110,24 @@ def test_top_endpoint_excludes_too_tight(base_url: str) -> None:
     _assert(code == 200, f"/api/v1/models/top expected 200, got {code}")
     models = data.get("models", [])
     for row in models:
-        _assert(row.get("fit_level") != "too_tight", "/models/top should not include too_tight fits")
+        _assert(
+            row.get("fit_level") != "too_tight",
+            "/models/top should not include too_tight fits",
+        )
 
 
 def test_filters_runtime_and_use_case(base_url: str) -> None:
-    code, data = _http_json(f"{base_url}/api/v1/models?limit=10&runtime=any&use_case=general")
+    code, data = _http_json(
+        f"{base_url}/api/v1/models?limit=10&runtime=any&use_case=general"
+    )
     _assert(code == 200, f"runtime/use_case filter query expected 200, got {code}")
     models = data.get("models", [])
     for row in models:
         category = str(row.get("category", "")).lower()
-        _assert(category == "general", "use_case=general should only return General category")
+        _assert(
+            category == "general",
+            "use_case=general should only return General category",
+        )
 
 
 def test_models_shape(base_url: str) -> None:
@@ -123,7 +156,55 @@ def test_models_shape(base_url: str) -> None:
         ],
         "/api/v1/models.models[0]",
     )
-    _expect_keys(sample["score_components"], ["quality", "speed", "fit", "context"], "/score_components")
+    _expect_keys(
+        sample["score_components"],
+        ["quality", "speed", "fit", "context"],
+        "/score_components",
+    )
+    _expect_keys(
+        sample, ["capabilities", "license", "supports_tp"], "/api/v1/models.models[0]"
+    )
+    _assert(isinstance(sample["capabilities"], list), "capabilities must be a list")
+
+
+def test_plan_endpoint_shape(base_url: str) -> None:
+    code, data = _http_json(f"{base_url}/api/v1/models?limit=10")
+    _assert(code == 200, f"seed query for /api/v1/plan expected 200, got {code}")
+    models = data.get("models", [])
+    if not models:
+        return
+
+    sample = next(
+        (
+            row
+            for row in models
+            if row.get("runtime") != "vllm"
+            and row.get("best_quant")
+            and row.get("fit_level") != "too_tight"
+        ),
+        models[0],
+    )
+    payload = {
+        "model": sample["name"],
+        "context": max(1024, int(sample.get("context_length") or 1024)),
+    }
+    code2, data2 = _http_json(f"{base_url}/api/v1/plan", method="POST", payload=payload)
+    _assert(code2 == 200, f"/api/v1/plan expected 200, got {code2}")
+    _expect_keys(
+        data2,
+        [
+            "model_name",
+            "quantization",
+            "context",
+            "target_tps",
+            "current",
+            "minimum",
+            "recommended",
+            "run_paths",
+            "upgrade_deltas",
+        ],
+        "/api/v1/plan",
+    )
 
 
 def test_name_lookup(base_url: str) -> None:
@@ -134,7 +215,7 @@ def test_name_lookup(base_url: str) -> None:
         return
 
     raw_name = str(models[0].get("name", "")).strip()
-    _assert(raw_name, "expected at least one model name")
+    _assert(bool(raw_name), "expected at least one model name")
 
     token = raw_name.split("/")[-1].split("-")[0] or raw_name[:8]
     path_name = urllib.parse.quote(token, safe="")
@@ -146,7 +227,9 @@ def test_name_lookup(base_url: str) -> None:
 
     if result_models:
         lower_token = token.lower()
-        matched = any(lower_token in str(row.get("name", "")).lower() for row in result_models)
+        matched = any(
+            lower_token in str(row.get("name", "")).lower() for row in result_models
+        )
         _assert(matched, "name lookup should return at least one model matching token")
 
 
@@ -170,7 +253,10 @@ def test_sort_score_desc(base_url: str) -> None:
             scores.append(float(score))
 
     for i in range(1, len(scores)):
-        _assert(scores[i - 1] >= scores[i] - 1e-9, "scores should be non-increasing for sort=score")
+        _assert(
+            scores[i - 1] >= scores[i] - 1e-9,
+            "scores should be non-increasing for sort=score",
+        )
 
 
 def wait_for_health(base_url: str, timeout_s: float = 30.0) -> None:
@@ -183,7 +269,9 @@ def wait_for_health(base_url: str, timeout_s: float = 30.0) -> None:
         except Exception:
             pass
         time.sleep(0.5)
-    raise RuntimeError(f"server did not become healthy at {base_url} within {timeout_s}s")
+    raise RuntimeError(
+        f"server did not become healthy at {base_url} within {timeout_s}s"
+    )
 
 
 def spawn_server(base_url: str, project_root: str) -> subprocess.Popen:
@@ -222,6 +310,7 @@ def run_all_tests(base_url: str) -> None:
         ("top excludes too_tight", test_top_endpoint_excludes_too_tight),
         ("filters runtime/use_case", test_filters_runtime_and_use_case),
         ("model row shape", test_models_shape),
+        ("plan endpoint shape", test_plan_endpoint_shape),
         ("name lookup", test_name_lookup),
         ("invalid filter 400", test_invalid_filter_returns_400),
         ("sort score desc", test_sort_score_desc),
@@ -234,7 +323,9 @@ def run_all_tests(base_url: str) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run llmfit REST API validation tests")
-    parser.add_argument("--base-url", default="http://127.0.0.1:8787", help="API base URL")
+    parser.add_argument(
+        "--base-url", default="http://127.0.0.1:8787", help="API base URL"
+    )
     parser.add_argument(
         "--spawn",
         action="store_true",
