@@ -88,6 +88,8 @@ jobs:
 
       - name: Build
         shell: bash
+        env:
+          LLMFIT_REQUIRE_WEB_DIST: 1
         run: |
           if [ "${{ matrix.use-cross }}" = "true" ]; then
             cross build --release --target ${{ matrix.target }}
@@ -181,12 +183,16 @@ jobs:
           npm run build
 
       - name: Publish llmfit-core to crates.io
+        env:
+          LLMFIT_REQUIRE_WEB_DIST: 1
         run: cargo publish -p llmfit-core --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
       - name: Wait for crates.io index update
         run: sleep 30
 
       - name: Publish llmfit to crates.io
+        env:
+          LLMFIT_REQUIRE_WEB_DIST: 1
         run: cargo publish -p llmfit --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
   update-homebrew:

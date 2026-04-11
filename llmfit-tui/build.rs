@@ -11,6 +11,7 @@ fn main() {
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
     let out_file = out_dir.join("web_assets.rs");
+    let require_web_dist = env_flag("LLMFIT_REQUIRE_WEB_DIST");
 
     let generated = if dist_dir.exists() {
         let mut files = Vec::new();
@@ -21,6 +22,11 @@ fn main() {
         }
         generate_assets_from_dist(&dist_dir, &files)
     } else {
+        if require_web_dist {
+            panic!(
+                "llmfit-web/dist is required for this build. Run `cd llmfit-web && npm ci && npm run build` before packaging or publishing."
+            );
+        }
         println!(
             "cargo:warning=llmfit-web/dist not found. Falling back to placeholder embedded dashboard. Run `npm ci && npm run build` in llmfit-web."
         );
@@ -28,6 +34,13 @@ fn main() {
     };
 
     fs::write(&out_file, generated).expect("failed to write generated web_assets.rs");
+}
+
+fn env_flag(name: &str) -> bool {
+    matches!(
+        env::var(name).ok().as_deref(),
+        Some("1") | Some("true") | Some("TRUE") | Some("yes") | Some("YES")
+    )
 }
 
 fn collect_files(dir: &Path, files: &mut Vec<PathBuf>) {
