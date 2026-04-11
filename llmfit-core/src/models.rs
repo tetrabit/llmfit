@@ -1,3 +1,10 @@
+//! Core model definitions and estimation helpers.
+//!
+//! Project policy: Rust is the source of truth for fit, memory, and speed
+//! estimate behavior. Other producers (for example the Python scraper) may
+//! mirror these constants for data generation, but runtime behavior and final
+//! estimate semantics are owned by `llmfit-core`.
+
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 

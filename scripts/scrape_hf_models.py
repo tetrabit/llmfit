@@ -244,7 +244,12 @@ TARGET_MODELS = [
     "google/gemma-3n-E2B-it",
 ]
 
-# Bytes-per-parameter for different quantization levels
+# Bytes-per-parameter for different quantization levels.
+#
+# Project policy: llmfit-core (Rust) owns the canonical estimate behavior used
+# at runtime. This script may mirror the same constants for data generation,
+# but parity with Rust must be maintained explicitly rather than treating the
+# Python values as independently authoritative.
 QUANT_BPP = {
     "F32": 4.0,
     "F16": 2.0,

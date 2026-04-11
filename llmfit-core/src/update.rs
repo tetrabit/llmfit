@@ -7,6 +7,10 @@
 //! The cache is automatically merged with the embedded model list each time
 //! `ModelDatabase::new()` is called, so users immediately benefit from any
 //! previously fetched models without needing to rebuild the binary.
+//!
+//! Project policy: refreshed/cache-derived model estimates must converge on
+//! the same Rust-owned estimation helpers used by embedded models. This module
+//! should not become a second source of truth for memory or speed math.
 
 use serde::Deserialize;
 use serde_json::Value;

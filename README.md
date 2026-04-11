@@ -505,6 +505,10 @@ cargo build --release
 
 The scraper writes `data/hf_models.json`, which is baked into the binary via `include_str!`. The automated update script backs up existing data, validates JSON output, and rebuilds the binary.
 
+Project policy: runtime estimate behavior is owned by `llmfit-core`. The
+Python scraper may mirror estimate constants for generation, but Rust is the
+authoritative source of fit, memory, and speed semantics used by the app.
+
 By default, the scraper enriches models with known GGUF download sources from providers like [unsloth](https://huggingface.co/unsloth) and [bartowski](https://huggingface.co/bartowski). Results are cached in `data/gguf_sources_cache.json` (7-day TTL) to avoid repeated API calls. Use `--no-gguf-sources` to skip enrichment for a faster scrape.
 
 ---
