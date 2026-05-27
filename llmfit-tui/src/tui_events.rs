@@ -108,7 +108,7 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) {
         KeyCode::Char('C') => app.open_capability_popup(),
         KeyCode::Char('Q') => app.open_quant_popup(),
         KeyCode::Char('L') => app.open_license_popup(),
-        KeyCode::Char('R') => app.open_runtime_popup(),
+        KeyCode::Char('R') => app.refresh_model_catalog(),
         KeyCode::Char('S') => app.open_simulation_popup(),
         KeyCode::Char('h') => app.open_help_popup(),
 
@@ -358,7 +358,7 @@ fn handle_license_popup_mode(app: &mut App, key: KeyEvent) {
 
 fn handle_runtime_popup_mode(app: &mut App, key: KeyEvent) {
     match key.code {
-        KeyCode::Esc | KeyCode::Char('R') | KeyCode::Char('q') => app.close_runtime_popup(),
+        KeyCode::Esc | KeyCode::Char('q') => app.close_runtime_popup(),
 
         KeyCode::Up | KeyCode::Char('k') => app.runtime_popup_up(),
         KeyCode::Down | KeyCode::Char('j') => app.runtime_popup_down(),
@@ -427,7 +427,7 @@ mod tests {
     use crate::tui_app::{AvailabilityFilter, ContextFilter, FitFilter, RuntimeFilter, TpFilter};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use llmfit_core::{
-        fit::SortColumn,
+        fit::{EstimationContextMode, SortColumn},
         hardware::{GpuBackend, SystemSpecs},
     };
 
@@ -451,6 +451,7 @@ mod tests {
                 cluster_node_count: 0,
             },
             None,
+            EstimationContextMode::DefaultCapped,
         );
         app.search_query = "nemotron".to_string();
         app.cursor_position = app.search_query.chars().count();
@@ -479,5 +480,37 @@ mod tests {
         assert!(!app.sort_ascending);
         assert!(app.search_query.is_empty());
         assert_eq!(app.pull_status.as_deref(), Some("Reset all filters"));
+    }
+
+    #[test]
+    fn shift_r_triggers_model_catalog_refresh_even_when_runtime_is_available() {
+        let mut app = crate::tui_app::App::with_specs_and_context(
+            SystemSpecs {
+                total_ram_gb: 64.0,
+                available_ram_gb: 48.0,
+                total_cpu_cores: 16,
+                cpu_name: "Test CPU".to_string(),
+                has_gpu: true,
+                gpu_vram_gb: Some(24.0),
+                total_gpu_vram_gb: Some(24.0),
+                gpu_name: Some("RTX 4090".to_string()),
+                gpu_count: 1,
+                unified_memory: false,
+                backend: GpuBackend::Cuda,
+                gpus: vec![],
+                cluster_mode: false,
+                cluster_node_count: 0,
+            },
+            None,
+            EstimationContextMode::DefaultCapped,
+        );
+        app.lmstudio_available = true;
+
+        handle_normal_mode(&mut app, KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT));
+
+        assert_eq!(
+            app.pull_status.as_deref(),
+            Some("Refreshing model catalog from HuggingFace...")
+        );
     }
 }

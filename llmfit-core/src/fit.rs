@@ -7,6 +7,19 @@ use crate::models::{self, LlmModel, UseCase};
 /// would wildly overestimate KV-cache memory for typical usage.
 pub const DEFAULT_ESTIMATION_CTX: u32 = 8_192;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EstimationContextMode {
+    DefaultCapped,
+    ModelMax,
+}
+
+impl Default for EstimationContextMode {
+    fn default() -> Self {
+        Self::DefaultCapped
+    }
+}
+
 /// Inference runtime — the software framework used for inference.
 /// Orthogonal to `GpuBackend` which represents hardware.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -150,7 +163,12 @@ pub struct ModelFit {
 
 impl ModelFit {
     pub fn analyze(model: &LlmModel, system: &SystemSpecs) -> Self {
-        Self::analyze_with_context_limit(model, system, None)
+        Self::analyze_with_context_settings(
+            model,
+            system,
+            None,
+            EstimationContextMode::DefaultCapped,
+        )
     }
 
     pub fn analyze_with_context_limit(
@@ -158,7 +176,21 @@ impl ModelFit {
         system: &SystemSpecs,
         context_limit: Option<u32>,
     ) -> Self {
-        Self::analyze_inner(model, system, context_limit, None)
+        Self::analyze_with_context_settings(
+            model,
+            system,
+            context_limit,
+            EstimationContextMode::DefaultCapped,
+        )
+    }
+
+    pub fn analyze_with_context_settings(
+        model: &LlmModel,
+        system: &SystemSpecs,
+        context_limit: Option<u32>,
+        estimation_context_mode: EstimationContextMode,
+    ) -> Self {
+        Self::analyze_inner(model, system, context_limit, estimation_context_mode, None)
     }
 
     /// Analyze with an optional runtime override.
@@ -178,13 +210,36 @@ impl ModelFit {
         context_limit: Option<u32>,
         force_runtime: Option<InferenceRuntime>,
     ) -> Self {
-        Self::analyze_inner(model, system, context_limit, force_runtime)
+        Self::analyze_with_runtime_options(
+            model,
+            system,
+            context_limit,
+            EstimationContextMode::DefaultCapped,
+            force_runtime,
+        )
+    }
+
+    pub fn analyze_with_runtime_options(
+        model: &LlmModel,
+        system: &SystemSpecs,
+        context_limit: Option<u32>,
+        estimation_context_mode: EstimationContextMode,
+        force_runtime: Option<InferenceRuntime>,
+    ) -> Self {
+        Self::analyze_inner(
+            model,
+            system,
+            context_limit,
+            estimation_context_mode,
+            force_runtime,
+        )
     }
 
     fn analyze_inner(
         model: &LlmModel,
         system: &SystemSpecs,
         context_limit: Option<u32>,
+        estimation_context_mode: EstimationContextMode,
         force_runtime: Option<InferenceRuntime>,
     ) -> Self {
         let mut notes = Vec::new();
@@ -197,7 +252,12 @@ impl ModelFit {
         // KV-cache memory requirements.
         let estimation_ctx = match context_limit {
             Some(limit) => limit.min(model_context_length),
-            None => model_context_length.min(DEFAULT_ESTIMATION_CTX),
+            None => match estimation_context_mode {
+                EstimationContextMode::DefaultCapped => {
+                    model_context_length.min(DEFAULT_ESTIMATION_CTX)
+                }
+                EstimationContextMode::ModelMax => model_context_length,
+            },
         };
 
         let min_vram = model.min_vram_gb.unwrap_or(model.min_ram_gb);
@@ -1786,6 +1846,39 @@ mod tests {
 
         assert!(capped.memory_required_gb < baseline.memory_required_gb);
         assert!(capped.notes.iter().any(|n| n.contains("Context capped at")));
+    }
+
+    #[test]
+    fn test_default_capped_mode_caps_at_default_estimation_ctx() {
+        let mut model = test_model("7B", 4.0, Some(4.0));
+        model.context_length = 32768;
+        let system = test_system(32.0, true, Some(16.0));
+
+        let fit = ModelFit::analyze_with_context_settings(
+            &model,
+            &system,
+            None,
+            EstimationContextMode::DefaultCapped,
+        );
+
+        assert!(fit.notes.iter().any(|n| n.contains("Context capped at 8192 tokens")));
+    }
+
+    #[test]
+    fn test_model_max_mode_uses_full_context_by_default() {
+        let mut model = test_model("7B", 4.0, Some(4.0));
+        model.context_length = 32768;
+        let system = test_system(32.0, true, Some(16.0));
+
+        let fit = ModelFit::analyze_with_context_settings(
+            &model,
+            &system,
+            None,
+            EstimationContextMode::ModelMax,
+        );
+
+        assert!(fit.memory_required_gb > 0.0);
+        assert!(!fit.notes.iter().any(|n| n.contains("Context capped at 8192 tokens")));
     }
 
     #[test]

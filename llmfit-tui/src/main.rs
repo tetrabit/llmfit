@@ -1,3 +1,4 @@
+mod config;
 mod display;
 mod serve_api;
 mod theme;
@@ -12,7 +13,7 @@ use std::process::Stdio;
 use std::thread;
 use std::time::Duration;
 
-use llmfit_core::fit::{ModelFit, SortColumn, backend_compatible};
+use llmfit_core::fit::{EstimationContextMode, ModelFit, SortColumn, backend_compatible};
 use llmfit_core::hardware::SystemSpecs;
 use llmfit_core::models::ModelDatabase;
 use llmfit_core::plan::{PlanRequest, estimate_model_plan, resolve_model_selector};
@@ -105,7 +106,8 @@ EXIT CODES:
   1  Any error (hardware detection failure, model not found, network error, etc.)
 
 ENVIRONMENT VARIABLES:
-  OLLAMA_CONTEXT_LENGTH  Default context-length cap when --max-context is not set.")]
+  OLLAMA_CONTEXT_LENGTH  Default context-length cap when --max-context is not set.
+  LLMFIT_ESTIMATION_CONTEXT_MODE  Estimation mode when --max-context is not set: default_capped or model_max.")]
 #[command(after_long_help = "For a compact summary, use -h instead of --help.")]
 #[command(version)]
 struct Cli {
@@ -708,6 +710,24 @@ fn resolve_context_limit(max_context: Option<u32>) -> Option<u32> {
     }
 }
 
+fn resolve_estimation_context_mode(config: &config::AppConfig) -> EstimationContextMode {
+    let Ok(raw) = std::env::var("LLMFIT_ESTIMATION_CONTEXT_MODE") else {
+        return config.estimation_context_mode;
+    };
+
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "default_capped" => EstimationContextMode::DefaultCapped,
+        "model_max" => EstimationContextMode::ModelMax,
+        _ => {
+            eprintln!(
+                "Warning: could not parse LLMFIT_ESTIMATION_CONTEXT_MODE='{}'. Expected default_capped or model_max.",
+                raw
+            );
+            config.estimation_context_mode
+        }
+    }
+}
+
 fn dashboard_pid_path() -> Option<std::path::PathBuf> {
     llmfit_core::update::cache_dir().map(|d| d.join("dashboard.pid"))
 }
@@ -856,6 +876,7 @@ fn run_fit(
     json: bool,
     overrides: &HardwareOverrides,
     context_limit: Option<u32>,
+    estimation_context_mode: EstimationContextMode,
 ) {
     let specs = detect_specs(overrides);
     let db = ModelDatabase::new();
@@ -874,7 +895,9 @@ fn run_fit(
         .get_all_models()
         .iter()
         .filter(|m| backend_compatible(m, &specs))
-        .map(|m| ModelFit::analyze_with_context_limit(m, &specs, context_limit))
+        .map(|m| {
+            ModelFit::analyze_with_context_settings(m, &specs, context_limit, estimation_context_mode)
+        })
         .collect();
 
     if perfect {
@@ -975,6 +998,7 @@ fn run_diff(
     json: bool,
     overrides: &HardwareOverrides,
     context_limit: Option<u32>,
+    estimation_context_mode: EstimationContextMode,
 ) {
     if limit < 2 {
         eprintln!("Error: --limit must be at least 2 for diff");
@@ -993,7 +1017,9 @@ fn run_diff(
         .get_all_models()
         .iter()
         .filter(|m| backend_compatible(m, &specs))
-        .map(|m| ModelFit::analyze_with_context_limit(m, &specs, context_limit))
+        .map(|m| {
+            ModelFit::analyze_with_context_settings(m, &specs, context_limit, estimation_context_mode)
+        })
         .collect();
 
     fits.retain(|f| fit_matches_filter(f, fit_filter));
@@ -1038,7 +1064,11 @@ fn run_diff(
     }
 }
 
-fn run_tui(overrides: &HardwareOverrides, context_limit: Option<u32>) -> std::io::Result<()> {
+fn run_tui(
+    overrides: &HardwareOverrides,
+    context_limit: Option<u32>,
+    estimation_context_mode: EstimationContextMode,
+) -> std::io::Result<()> {
     // Setup terminal
     crossterm::terminal::enable_raw_mode()?;
     let mut stdout = std::io::stdout();
@@ -1055,7 +1085,8 @@ fn run_tui(overrides: &HardwareOverrides, context_limit: Option<u32>) -> std::io
     // Create app state
     let specs = detect_specs(overrides);
     draw_boot_screen(&mut terminal, "Loading providers and models...")?;
-    let mut app = tui_app::App::with_specs_and_context(specs, context_limit);
+    let mut app =
+        tui_app::App::with_specs_and_context(specs, context_limit, estimation_context_mode);
 
     // Main loop
     loop {
@@ -1128,6 +1159,7 @@ fn run_recommend(
     json: bool,
     overrides: &HardwareOverrides,
     context_limit: Option<u32>,
+    estimation_context_mode: EstimationContextMode,
 ) {
     let specs = detect_specs(overrides);
     let db = ModelDatabase::new();
@@ -1179,7 +1211,13 @@ fn run_recommend(
         .filter(|m| backend_compatible(m, &specs))
         .map(|m| {
             let mut fit =
-                ModelFit::analyze_with_forced_runtime(m, &specs, context_limit, forced_rt);
+                ModelFit::analyze_with_runtime_options(
+                    m,
+                    &specs,
+                    context_limit,
+                    estimation_context_mode,
+                    forced_rt,
+                );
             fit.installed = provs::is_model_installed(&m.name, &ollama_installed)
                 || provs::is_model_installed_mlx(&m.name, &mlx_installed)
                 || provs::is_model_installed_llamacpp(&m.name, &llamacpp_installed)
@@ -1810,6 +1848,7 @@ fn load_llmfit_env_file() {
 fn main() {
     load_llmfit_env_file();
     let cli = Cli::parse();
+    let app_config = config::AppConfig::load().unwrap_or_default();
     if cli.refresh_models && !matches!(cli.command.as_ref(), Some(Commands::Update { .. }))
         && let Err(err) = refresh_models_now(|msg| eprintln!("{}", msg))
     {
@@ -1817,6 +1856,7 @@ fn main() {
         std::process::exit(1);
     }
     let context_limit = resolve_context_limit(cli.max_context);
+    let estimation_context_mode = resolve_estimation_context_mode(&app_config);
     let overrides = HardwareOverrides {
         memory: cli.memory,
         ram: cli.ram,
@@ -1872,6 +1912,7 @@ fn main() {
                     cli.json,
                     &overrides,
                     context_limit,
+                    estimation_context_mode,
                 );
             }
 
@@ -1894,7 +1935,12 @@ fn main() {
                     }
                 };
 
-                let fit = ModelFit::analyze_with_context_limit(&models[idx], &specs, context_limit);
+                let fit = ModelFit::analyze_with_context_settings(
+                    &models[idx],
+                    &specs,
+                    context_limit,
+                    estimation_context_mode,
+                );
                 if cli.json {
                     display::display_json_fits(&specs, &[fit]);
                 } else {
@@ -1918,6 +1964,7 @@ fn main() {
                     cli.json,
                     &overrides,
                     context_limit,
+                    estimation_context_mode,
                 );
             }
 
@@ -1955,6 +2002,7 @@ fn main() {
                     json,
                     &overrides,
                     context_limit,
+                    estimation_context_mode,
                 );
             }
 
@@ -1992,7 +2040,13 @@ fn main() {
             }
 
             Commands::Serve { host, port } => {
-                if let Err(err) = serve_api::run_serve(&host, port, &overrides, context_limit) {
+                if let Err(err) = serve_api::run_serve(
+                    &host,
+                    port,
+                    &overrides,
+                    context_limit,
+                    estimation_context_mode,
+                ) {
                     eprintln!("Error: {}", err);
                     std::process::exit(1);
                 }
@@ -2010,12 +2064,13 @@ fn main() {
             cli.json,
             &overrides,
             context_limit,
+            estimation_context_mode,
         );
         return;
     }
 
     // Default: launch TUI
-    if let Err(e) = run_tui(&overrides, context_limit) {
+    if let Err(e) = run_tui(&overrides, context_limit, estimation_context_mode) {
         eprintln!("Error running TUI: {}", e);
         std::process::exit(1);
     }

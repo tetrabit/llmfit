@@ -9,7 +9,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use llmfit_core::fit::{
-    FitLevel, InferenceRuntime, ModelFit, SortColumn, backend_compatible,
+    EstimationContextMode, FitLevel, InferenceRuntime, ModelFit, SortColumn, backend_compatible,
     rank_models_by_fit_opts_col,
 };
 use llmfit_core::hardware::{GpuBackend, SystemSpecs};
@@ -32,6 +32,7 @@ struct AppState {
     specs: SystemSpecs,
     models: Vec<LlmModel>,
     context_limit: Option<u32>,
+    estimation_context_mode: EstimationContextMode,
     active_download: tokio::sync::RwLock<Option<ActiveDownload>>,
     download_counter: std::sync::atomic::AtomicU32,
 }
@@ -127,6 +128,7 @@ pub fn run_serve(
     port: u16,
     overrides: &super::HardwareOverrides,
     context_limit: Option<u32>,
+    estimation_context_mode: EstimationContextMode,
 ) -> Result<(), String> {
     let ip: IpAddr = host
         .parse()
@@ -145,11 +147,12 @@ pub fn run_serve(
     let state = Arc::new(AppState {
         node_name,
         os: std::env::consts::OS.to_string(),
-        specs,
-        models: all_models,
-        context_limit,
-        active_download: tokio::sync::RwLock::new(None),
-        download_counter: std::sync::atomic::AtomicU32::new(0),
+            specs,
+            models: all_models,
+            context_limit,
+            estimation_context_mode,
+            active_download: tokio::sync::RwLock::new(None),
+            download_counter: std::sync::atomic::AtomicU32::new(0),
     });
 
     let app = build_router(state);
@@ -660,7 +663,15 @@ fn filtered_fits(
         .models
         .iter()
         .filter(|m| backend_compatible(m, &state.specs))
-        .map(|m| ModelFit::analyze_with_forced_runtime(m, &state.specs, context_limit, forced_rt))
+        .map(|m| {
+            ModelFit::analyze_with_runtime_options(
+                m,
+                &state.specs,
+                context_limit,
+                state.estimation_context_mode,
+                forced_rt,
+            )
+        })
         .collect();
 
     let is_apple_silicon = state.specs.backend == GpuBackend::Metal && state.specs.unified_memory;
@@ -996,6 +1007,7 @@ mod tests {
             specs: SystemSpecs::detect(),
             models: db.get_all_models().clone(),
             context_limit: None,
+            estimation_context_mode: EstimationContextMode::DefaultCapped,
             active_download: tokio::sync::RwLock::new(None),
             download_counter: std::sync::atomic::AtomicU32::new(0),
         })
@@ -1028,6 +1040,7 @@ mod tests {
             },
             models: db.get_all_models().clone(),
             context_limit: None,
+            estimation_context_mode: EstimationContextMode::DefaultCapped,
             active_download: tokio::sync::RwLock::new(None),
             download_counter: std::sync::atomic::AtomicU32::new(0),
         }))

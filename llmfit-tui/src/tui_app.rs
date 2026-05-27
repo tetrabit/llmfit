@@ -1,4 +1,7 @@
-use llmfit_core::fit::{FitLevel, InferenceRuntime, ModelFit, SortColumn, backend_compatible};
+use llmfit_core::fit::{
+    EstimationContextMode, FitLevel, InferenceRuntime, ModelFit, SortColumn,
+    backend_compatible,
+};
 use llmfit_core::hardware::SystemSpecs;
 use llmfit_core::models::{Capability, LlmModel, ModelDatabase, UseCase};
 use llmfit_core::plan::{PlanEstimate, PlanRequest, estimate_model_plan};
@@ -497,6 +500,7 @@ pub struct App {
     pub specs: SystemSpecs,
     source_models: Vec<LlmModel>,
     base_context_limit: Option<u32>,
+    estimation_context_mode: EstimationContextMode,
     pub all_fits: Vec<ModelFit>,
     pub filtered_fits: Vec<usize>, // indices into all_fits
     pub providers: Vec<String>,
@@ -807,6 +811,7 @@ impl App {
         models: &[LlmModel],
         specs: &SystemSpecs,
         context_limit: Option<u32>,
+        estimation_context_mode: EstimationContextMode,
         ollama_installed: &HashSet<String>,
         mlx_installed: &HashSet<String>,
         llamacpp_installed: &HashSet<String>,
@@ -817,7 +822,12 @@ impl App {
         models
             .iter()
             .map(|m| {
-                let mut fit = ModelFit::analyze_with_context_limit(m, specs, context_limit);
+                let mut fit = ModelFit::analyze_with_context_settings(
+                    m,
+                    specs,
+                    context_limit,
+                    estimation_context_mode,
+                );
                 fit.installed = providers::is_model_installed(&m.name, ollama_installed)
                     || providers::is_model_installed_mlx(&m.name, mlx_installed)
                     || providers::is_model_installed_llamacpp(&m.name, llamacpp_installed)
@@ -908,7 +918,11 @@ impl App {
         }
     }
 
-    pub fn with_specs_and_context(specs: SystemSpecs, context_limit: Option<u32>) -> Self {
+    pub fn with_specs_and_context(
+        specs: SystemSpecs,
+        context_limit: Option<u32>,
+        estimation_context_mode: EstimationContextMode,
+    ) -> Self {
         let real_specs = specs.clone();
         let db = ModelDatabase::new();
 
@@ -960,6 +974,7 @@ impl App {
             &source_models,
             &specs,
             context_limit,
+            estimation_context_mode,
             &ollama_installed,
             &mlx_installed,
             &llamacpp_installed,
@@ -1070,6 +1085,7 @@ impl App {
             specs,
             source_models,
             base_context_limit: context_limit,
+            estimation_context_mode,
             all_fits,
             filtered_fits: (0..filtered_count).collect(),
             providers: model_providers,
@@ -2242,10 +2258,6 @@ impl App {
         self.save_filter_state();
     }
 
-    pub fn open_runtime_popup(&mut self) {
-        self.input_mode = InputMode::RuntimePopup;
-    }
-
     pub fn close_runtime_popup(&mut self) {
         self.input_mode = InputMode::Normal;
     }
@@ -2444,6 +2456,7 @@ impl App {
             &self.source_models,
             &self.specs,
             context_limit,
+            self.estimation_context_mode,
             &self.ollama_installed,
             &self.mlx_installed,
             &self.llamacpp_installed,
@@ -3102,7 +3115,7 @@ mod tests {
         App, AvailabilityFilter, ContextFilter, FilterState, FitFilter, RuntimeFilter, TpFilter,
     };
     use llmfit_core::{
-        fit::{FitLevel, InferenceRuntime, ModelFit, RunMode, ScoreComponents},
+        fit::{EstimationContextMode, FitLevel, InferenceRuntime, ModelFit, RunMode, ScoreComponents},
         hardware::{GpuBackend, SystemSpecs},
         models::{Capability, GgufSource, LlmModel, ModelFormat, UseCase},
     };
@@ -3473,6 +3486,7 @@ mod tests {
             specs: test_specs(),
             source_models: vec![],
             base_context_limit: None,
+            estimation_context_mode: EstimationContextMode::DefaultCapped,
             all_fits: vec![ModelFit {
                 model: LlmModel {
                     name: model_name.to_string(),
@@ -4185,6 +4199,7 @@ mod tests {
             input_mode: super::InputMode::Normal,
             search_query: String::new(),
             cursor_position: 0,
+            estimation_context_mode: EstimationContextMode::DefaultCapped,
             specs: SystemSpecs {
                 total_ram_gb: 64.0,
                 available_ram_gb: 48.0,
@@ -4366,6 +4381,7 @@ mod tests {
                 cluster_node_count: 0,
             },
             None,
+            EstimationContextMode::DefaultCapped,
         );
 
         app.fit_filter = FitFilter::Runnable;
@@ -4427,6 +4443,7 @@ mod tests {
             input_mode: super::InputMode::Normal,
             search_query: String::new(),
             cursor_position: 0,
+            estimation_context_mode: EstimationContextMode::DefaultCapped,
             specs: SystemSpecs {
                 total_ram_gb: 64.0,
                 available_ram_gb: 48.0,
@@ -4612,6 +4629,7 @@ mod tests {
             input_mode: super::InputMode::Normal,
             search_query: String::new(),
             cursor_position: 0,
+            estimation_context_mode: EstimationContextMode::DefaultCapped,
             specs: SystemSpecs {
                 total_ram_gb: 64.0,
                 available_ram_gb: 48.0,
@@ -4795,6 +4813,7 @@ mod tests {
             input_mode: super::InputMode::Normal,
             search_query: String::new(),
             cursor_position: 0,
+            estimation_context_mode: EstimationContextMode::DefaultCapped,
             specs: SystemSpecs {
                 total_ram_gb: 64.0,
                 available_ram_gb: 48.0,
@@ -4992,6 +5011,7 @@ mod tests {
                 cluster_node_count: 0,
             },
             None,
+            EstimationContextMode::DefaultCapped,
         );
 
         app.all_fits = vec![ModelFit {
